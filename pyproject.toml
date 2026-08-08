@@ -1,0 +1,25 @@
+[project]
+name = "py"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "google-api-python-client>=2.198.0",
+    "google-auth>=2.56.3",
+    "pillow>=12.3.0",
+    "psutil>=7.2.2",
+    "pygobject>=3.56.3",
+    "pyside6>=6.11.1",
+    "python-mpv>=1.0.8",
+]
+
+[tool.basedpyright]
+reportMissingModuleSource = "none"
+venvPath = "."
+venv = ".venv"
+
+[dependency-groups]
+dev = [
+    "pygobject-stubs>=2.17.0",
+]
