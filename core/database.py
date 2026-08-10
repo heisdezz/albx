@@ -39,6 +39,7 @@ def initialize_database(conn: sqlite3.Connection) -> None:
             name TEXT UNIQUE NOT NULL,
             relative_path TEXT UNIQUE NOT NULL,
             description TEXT,
+            media_count INTEGER DEFAULT 0,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
     """)
@@ -60,6 +61,43 @@ def initialize_database(conn: sqlite3.Connection) -> None:
             tag_id INTEGER,
             PRIMARY KEY (media_id, tag_id)
         );
+    """)
+
+    # Schema migration: Check if media_count exists in albums
+    cursor.execute("PRAGMA table_info(albums);")
+    columns = [info[1] for info in cursor.fetchall()]
+    if "media_count" not in columns:
+        cursor.execute("ALTER TABLE albums ADD COLUMN media_count INTEGER DEFAULT 0;")
+        # Populate media_count value for existing rows
+        cursor.execute("""
+            UPDATE albums SET media_count = (
+                SELECT COUNT(*) FROM media_items WHERE album_id = albums.id
+            );
+        """)
+
+    # SQLite Triggers to keep media_count up to date automatically
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS after_media_insert
+        AFTER INSERT ON media_items
+        BEGIN
+            UPDATE albums SET media_count = media_count + 1 WHERE id = NEW.album_id;
+        END;
+    """)
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS after_media_delete
+        AFTER DELETE ON media_items
+        BEGIN
+            UPDATE albums SET media_count = MAX(0, media_count - 1) WHERE id = OLD.album_id;
+        END;
+    """)
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS after_media_update
+        AFTER UPDATE OF album_id ON media_items
+        WHEN OLD.album_id != NEW.album_id
+        BEGIN
+            UPDATE albums SET media_count = MAX(0, media_count - 1) WHERE id = OLD.album_id;
+            UPDATE albums SET media_count = media_count + 1 WHERE id = NEW.album_id;
+        END;
     """)
 
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_media_album_created ON media_items(album_id, created_at);")
@@ -93,6 +131,15 @@ def open_library_db(db_path: str) -> sqlite3.Connection:
 
 
 def open_readable_db(db_path: str) -> sqlite3.Connection:
+    # Safely verify / run database schema migrations in write mode first
+    try:
+        if os.path.exists(db_path) and os.access(os.path.dirname(db_path), os.W_OK):
+            conn_w = get_database_connection(db_path)
+            if conn_w:
+                conn_w.close()
+    except Exception as e:
+        print(f"[Database] Migration verify check failed (possibly read-only volume): {e}")
+
     db_uri = f"file:{db_path}?mode=ro"
     conn = sqlite3.connect(db_uri, uri=True, timeout=5.0)
     conn.row_factory = sqlite3.Row

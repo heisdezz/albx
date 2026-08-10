@@ -13,13 +13,14 @@ class FilterBarWidget(QFrame):
         filter_type: str = "ALL",
         sort_by: str = "date",
         sort_order: str = "desc",
+        search_query: str = "",
         parent=None
     ):
         super().__init__(parent)
         self.filter_type = filter_type.upper()
         self.sort_by = sort_by
         self.sort_order = sort_order.lower()
-        self.search_query = ""
+        self.search_query = search_query
         self.total_items = 0
 
         self.setObjectName("GlassCard")
@@ -100,6 +101,24 @@ class FilterBarWidget(QFrame):
         right_box.addWidget(self.search_widget)
 
         layout.addLayout(right_box)
+
+        # Pre-select matching item in sort_combo
+        self.sort_combo.blockSignals(True)
+        for i in range(self.sort_combo.count()):
+            if self.sort_combo.itemData(i) == self.sort_by:
+                self.sort_combo.setCurrentIndex(i)
+                break
+        self.sort_combo.blockSignals(False)
+
+        # Pre-populate sort order button
+        self.sort_btn.setText("ASC ↑" if self.sort_order == "asc" else "DESC ↓")
+
+        # Pre-populate search query text
+        if hasattr(self, "search_widget"):
+            self.search_widget.input.blockSignals(True)
+            self.search_widget.setText(self.search_query)
+            self.search_widget.input.blockSignals(False)
+
         self.update_button_styles()
 
     def set_filter_type(self, ftype: str):

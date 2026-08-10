@@ -1,12 +1,21 @@
 import os
-from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QScrollArea, QFrame, QProgressBar
-)
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
+from PySide6.QtWidgets import (
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QProgressBar,
+    QPushButton,
+    QScrollArea,
+    QVBoxLayout,
+    QWidget,
+)
+
 from core.drives import get_connected_drives, mount_block_device, unmount_block_device
 from router import get_router
+
 
 class DriveRow(QFrame):
     drive_selected = Signal(dict)
@@ -36,7 +45,9 @@ class DriveRow(QFrame):
         title_row = QHBoxLayout()
         title_row.setSpacing(8)
 
-        drive_name = self.drive.get("label") or self.drive.get("name") or "Storage Volume"
+        drive_name = (
+            self.drive.get("label") or self.drive.get("name") or "Storage Volume"
+        )
         name_lbl = QLabel(drive_name)
         name_lbl.setStyleSheet("font-weight: 700; font-size: 15px;")
         title_row.addWidget(name_lbl)
@@ -68,7 +79,11 @@ class DriveRow(QFrame):
         layout.addLayout(info_layout, stretch=2)
 
         # Usage / Progress Column (if mounted)
-        is_mounted = self.drive.get("is_mounted") or self.drive.get("status") == "mounted" or bool(mount_path)
+        is_mounted = (
+            self.drive.get("is_mounted")
+            or self.drive.get("status") == "mounted"
+            or bool(mount_path)
+        )
 
         if is_mounted:
             usage_box = QVBoxLayout()
@@ -139,6 +154,7 @@ class DriveRow(QFrame):
             if res.get("success"):
                 self.refresh_requested.emit()
 
+
 class DriveSelectorView(QWidget):
     def __init__(self, parent_window=None):
         super().__init__(parent_window)
@@ -155,7 +171,9 @@ class DriveSelectorView(QWidget):
         title_box = QVBoxLayout()
         title = QLabel("Storage Drives Explorer")
         title.setObjectName("TitleLabel")
-        subtitle = QLabel("Select a mounted external volume or mount block devices to manage media.")
+        subtitle = QLabel(
+            "Select a mounted external volume or mount block devices to manage media."
+        )
         subtitle.setObjectName("SubtitleLabel")
         title_box.addWidget(title)
         title_box.addWidget(subtitle)
@@ -171,6 +189,14 @@ class DriveSelectorView(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll_content = QWidget()
+        # Transparent container: the drives list sits directly on the page
+        # (no card/panel background behind the rows).
+        scroll_content.setObjectName("DrivesContainer")
+        scroll_content.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        scroll_content.setStyleSheet(
+            "QWidget#DrivesContainer { background-color: transparent; border: none; }"
+        )
+        scroll.viewport().setAutoFillBackground(False)
         self.list_layout = QVBoxLayout(scroll_content)
         self.list_layout.setSpacing(12)
         scroll.setWidget(scroll_content)
@@ -201,12 +227,12 @@ class DriveSelectorView(QWidget):
 
         self.list_layout.addStretch()
 
-        if self.parent_window and hasattr(self.parent_window, 'refresh_sidebar_drives'):
+        if self.parent_window and hasattr(self.parent_window, "refresh_sidebar_drives"):
             self.parent_window.refresh_sidebar_drives()
 
     def on_drive_state_changed(self):
         self.load_drives()
-        if self.parent_window and hasattr(self.parent_window, 'refresh_sidebar_drives'):
+        if self.parent_window and hasattr(self.parent_window, "refresh_sidebar_drives"):
             self.parent_window.refresh_sidebar_drives()
 
     def on_drive_selected(self, drive: dict):

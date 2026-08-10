@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
 from core.database import get_db_path, open_readable_db
 from core.drives import get_connected_drives, mount_block_device
 from router import get_router
-from ui.widgets.media_card import MediaCard
+from ui.widgets.media_grid import MediaGridView
 
 
 class DashAlbumCard(QFrame):
@@ -70,6 +70,7 @@ class DashboardView(QWidget):
         super().__init__(parent_window)
         self.parent_window = parent_window
         self.drive = drive
+        self.media_grid = None  # created by render_active_dashboard
         self.build_ui()
 
     def build_ui(self):
@@ -363,9 +364,9 @@ class DashboardView(QWidget):
                     media_rows = cursor.fetchall()
 
                     cursor.execute("""
-                        SELECT a.id, a.name, a.relative_path, a.created_at, COUNT(m.id) as media_count
-                        FROM albums a LEFT JOIN media_items m ON a.id = m.album_id
-                        GROUP BY a.id ORDER BY a.created_at DESC LIMIT 4
+                        SELECT id, name, relative_path, created_at, media_count
+                        FROM albums
+                        ORDER BY created_at DESC LIMIT 4
                     """)
                     album_rows = cursor.fetchall()
                 except Exception as e:
@@ -448,29 +449,16 @@ class DashboardView(QWidget):
 
             self.content_layout.addWidget(empty_m)
         else:
-            m_grid = QGridLayout()
-            m_grid.setSpacing(10)
-            mr, mc = 0, 0
-            for m_row in media_rows:
-                item_dict = {
-                    "id": m_row[0],
-                    "current_relative_path": m_row[1],
-                    "mime_type": m_row[2],
-                    "file_size": m_row[3],
-                    "created_at": m_row[4],
-                    "file_hash": m_row[5] if len(m_row) > 5 else None,
-                }
-                card = MediaCard(item_dict, drive_path)
-                card.setFixedSize(160, 160)
-                card.card_clicked.connect(
-                    lambda it: get_router().navigate("/viewer", {"item": it})
-                )
-                m_grid.addWidget(card, mr, mc)
-                mc += 1
-                if mc >= 4:
-                    mc = 0
-                    mr += 1
-            self.content_layout.addLayout(m_grid)
+            # Reusable, self-sizing grid (flat mode) - the dashboard's own
+            # scroll area handles overflow.
+            self.media_grid = MediaGridView(
+                drive=self.drive,
+                filter_type="ALL",
+                page_size=8,
+                show_filter_bar=False,
+                scrollable=False,
+            )
+            self.content_layout.addWidget(self.media_grid)
 
         # Section: Recent Albums
         albums_hdr = QHBoxLayout()

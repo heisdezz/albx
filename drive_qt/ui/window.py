@@ -62,21 +62,21 @@ class FramelessTitleBar(QFrame):
         layout.addWidget(self.theme_combo)
 
         # Window Controls
-        min_btn = QPushButton("—")
+        min_btn = QPushButton("➖")
         min_btn.setFixedSize(28, 28)
-        min_btn.setStyleSheet("border: none; font-size: 14px; font-weight: bold;")
+        min_btn.setStyleSheet("border: none; font-size: 11px;")
         min_btn.clicked.connect(self.parent_window.showMinimized)
         layout.addWidget(min_btn)
 
-        max_btn = QPushButton("▢")
+        max_btn = QPushButton("⬜")
         max_btn.setFixedSize(28, 28)
-        max_btn.setStyleSheet("border: none; font-size: 12px;")
+        max_btn.setStyleSheet("border: none; font-size: 10px;")
         max_btn.clicked.connect(self.toggle_maximize)
         layout.addWidget(max_btn)
 
-        close_btn = QPushButton("✕")
+        close_btn = QPushButton("❌")
         close_btn.setFixedSize(28, 28)
-        close_btn.setStyleSheet("border: none; font-size: 14px; color: #f38ba8; font-weight: bold;")
+        close_btn.setStyleSheet("border: none; font-size: 11px;")
         close_btn.clicked.connect(self.parent_window.close)
         layout.addWidget(close_btn)
 
@@ -316,7 +316,10 @@ class MainWindow(QMainWindow):
             view = DiscoverView(self, self.selected_drive)
         elif path == "/media":
             filter_type = params.get("filter", "ALL")
-            view = MediaGridView(self, self.selected_drive, filter_type)
+            album_name = params.get("album", None)
+            view = MediaGridView(
+                self, self.selected_drive, filter_type, album_name=album_name
+            )
         elif path == "/albums":
             view = AlbumsView(self, self.selected_drive)
         elif path == "/viewer":

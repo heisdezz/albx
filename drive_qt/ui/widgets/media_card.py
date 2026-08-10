@@ -40,6 +40,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.thumbnails import get_or_generate_thumbnail
+from ui.selection_store import get_selection_store
 from ui.theme import get_theme_manager
 
 
@@ -90,6 +91,7 @@ class MediaCard(QFrame):
     def __init__(self, item: dict, drive_path: str):
         super().__init__()
         self.item = item
+        self.item_id = item.get("id")
         self.drive_path = drive_path
         self.is_video = item.get("mime_type", "").startswith("video/")
         self.setObjectName("GlassCard")
@@ -98,8 +100,11 @@ class MediaCard(QFrame):
 
         self._zoom = 1.0
         self._hovered = False
+        self._selected = False
         self._full_pixmap = QPixmap()
         self._scaled_for = QSize(0, 0)
+        self.thumbnail_loaded = False
+        self.thumbnail_loading = False
 
         theme = get_theme_manager().get_theme()
 
@@ -107,7 +112,8 @@ class MediaCard(QFrame):
         self.type_color = theme["accent"] if self.is_video else theme["fg_title"]
 
         # rounded-2xl corners, overriding the flatter global GlassCard radius.
-        self.setStyleSheet(
+        # A 2px accent border marks the selected state (React's ring-primary).
+        self._style_base = (
             "QFrame#GlassCard {"
             f"  background-color: {theme['bg_card']};"
             f"  border: 1px solid {theme['border']};"
@@ -117,11 +123,27 @@ class MediaCard(QFrame):
             f"  border-color: {theme['accent_dim']};"
             "}"
         )
+        self._style_selected = (
+            "QFrame#GlassCard {"
+            f"  background-color: {theme['bg_card']};"
+            f"  border: 2px solid {theme['accent']};"
+            "  border-radius: 16px;"
+            "}"
+        )
+        self.setStyleSheet(self._style_base)
 
         self._build_shadow()
         self._build_children(theme)
         self._build_animations()
-        self.load_thumbnail()
+        # self.load_thumbnail() is deferred and called on-demand by the scroll area viewport
+
+        # Subscribe to global selection state. Qt auto-disconnects these when
+        # the card is destroyed (on page change), so no manual cleanup needed.
+        store = get_selection_store()
+        store.mode_changed.connect(self._on_selection_mode_changed)
+        store.selection_changed.connect(self._on_selection_changed)
+        self.check_lbl.setVisible(store.is_selecting)
+        self._refresh_selected()
 
     def _build_shadow(self):
         self._shadow = QGraphicsDropShadowEffect(self)
@@ -131,6 +153,7 @@ class MediaCard(QFrame):
         self.setGraphicsEffect(self._shadow)
 
     def _build_children(self, t):
+        self._theme = t
         filename = os.path.basename(self.item.get("current_relative_path", "file"))
         self._filename = filename
 
@@ -260,6 +283,35 @@ class MediaCard(QFrame):
         badge_layout.addWidget(text_lbl)
         self._transparent_for_mouse(self.badge)
 
+        # Selection checkbox, top-left (only visible in selection mode).
+        self.check_lbl = QLabel(self)
+        self.check_lbl.setFixedSize(22, 22)
+        self.check_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._apply_check_style(t)
+        self.check_lbl.hide()
+        self._transparent_for_mouse(self.check_lbl)
+
+    def _apply_check_style(self, t):
+        if self._selected:
+            self.check_lbl.setText("✓")
+            self.check_lbl.setStyleSheet(
+                "QLabel {"
+                f"  background-color: {t['accent']};"
+                f"  color: {t['bg_root']};"
+                f"  border: 2px solid {t['accent']};"
+                "  border-radius: 6px; font-size: 13px; font-weight: 900;"
+                "}"
+            )
+        else:
+            self.check_lbl.setText("")
+            self.check_lbl.setStyleSheet(
+                "QLabel {"
+                "  background-color: rgba(0, 0, 0, 0.5);"
+                f"  border: 2px solid {t['fg_sub']};"
+                "  border-radius: 6px;"
+                "}"
+            )
+
     @staticmethod
     def _tint(color: str, alpha: float) -> str:
         """Return `color` (a #rrggbb hex) as an rgba() string with `alpha`."""
@@ -350,8 +402,33 @@ class MediaCard(QFrame):
     # --- events ---------------------------------------------------------------
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        store = get_selection_store()
+        if store.is_selecting:
+            if self.item_id is not None:
+                store.toggle(self.item_id)
+        else:
             self.card_clicked.emit(self.item)
+
+    # --- selection ------------------------------------------------------------
+
+    def _on_selection_mode_changed(self, selecting: bool):
+        self.check_lbl.setVisible(selecting)
+        self._refresh_selected()
+
+    def _on_selection_changed(self, changed_ids: set):
+        # Only repaint when this card's own id was affected (per-node update).
+        if self.item_id in changed_ids:
+            self._refresh_selected()
+
+    def _refresh_selected(self):
+        selected = get_selection_store().is_selected(self.item_id)
+        if selected == self._selected:
+            return
+        self._selected = selected
+        self.setStyleSheet(self._style_selected if selected else self._style_base)
+        self._apply_check_style(self._theme)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -380,21 +457,45 @@ class MediaCard(QFrame):
             badge_size.width(),
             badge_size.height(),
         )
+        self.check_lbl.move(10, 10)
         self._apply_pixmap()
 
     # --- thumbnail ------------------------------------------------------------
 
     def load_thumbnail(self):
-        loader = ThumbnailLoader(self.item, self.drive_path)
-        self.loader = loader
-        # Keep the thread alive until it finishes even if the card is deleted
-        # mid-load (prevents "QThread destroyed while running" on page changes).
-        MediaCard._loaders.add(loader)
-        loader.finished.connect(lambda: MediaCard._loaders.discard(loader))
-        loader.loaded.connect(self.on_thumb_loaded)
-        loader.start()
+        if self.thumbnail_loaded or self.thumbnail_loading:
+            return
+
+        rel_path = self.item.get("current_relative_path", "")
+        if not rel_path or not self.drive_path:
+            return
+
+        thumb_dir = os.path.join(self.drive_path, "albums", "thumbs")
+        file_hash = (
+            self.item.get("file_hash") or hashlib.md5(rel_path.encode()).hexdigest()
+        )
+        thumb_path = os.path.join(thumb_dir, f"{file_hash}.jpg")
+
+        if os.path.exists(thumb_path):
+            self.on_thumb_loaded(thumb_path)
+        else:
+            self.thumbnail_loading = True
+            loader = ThumbnailLoader(self.item, self.drive_path)
+            self.loader = loader
+            # Keep the thread alive until it finishes even if the card is deleted
+            # mid-load (prevents "QThread destroyed while running" on page changes).
+            MediaCard._loaders.add(loader)
+            loader.finished.connect(self._on_loader_finished)
+            loader.finished.connect(lambda: MediaCard._loaders.discard(loader))
+            loader.loaded.connect(self.on_thumb_loaded)
+            loader.start()
+
+    def _on_loader_finished(self):
+        self.thumbnail_loading = False
 
     def on_thumb_loaded(self, path: str):
+        self.thumbnail_loaded = True
+        self.thumbnail_loading = False
         pixmap = QPixmap(path)
         if not pixmap.isNull():
             self._full_pixmap = pixmap
@@ -448,7 +549,7 @@ class MediaCard(QFrame):
     def _format_size(size) -> str:
         try:
             return f"{float(size) / (1024 * 1024):.2f} MB"
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             return ""
 
     @staticmethod
@@ -462,5 +563,5 @@ class MediaCard(QFrame):
             if not text:
                 return ""
             return datetime.fromisoformat(text).strftime("%b %d, %Y")
-        except ValueError, TypeError, OverflowError, OSError:
+        except (ValueError, TypeError, OverflowError, OSError):
             return str(value)
