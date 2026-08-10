@@ -30,7 +30,9 @@ def main():
     if backend == "qt":
         mod = _load_backend(os.path.join(root, "drive_qt"), "main.py", "drive_qt.main")
     else:
-        mod = _load_backend(os.path.join(root, "drive_gtk"), "main.py", "drive_gtk.main")
+        mod = _load_backend(
+            os.path.join(root, "drive_gtk"), "main.py", "drive_gtk.main"
+        )
 
     mod.main()
 
