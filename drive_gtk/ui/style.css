@@ -9,6 +9,11 @@ window {
     border-right: 1px solid rgba(255, 255, 255, 0.08);
 }
 
+/* Dashboard stat cards — extra interior padding on top of the theme's .card */
+.stat-card {
+    padding: 20px;
+}
+
 .sidebar-row {
     padding: 8px 12px;
     margin: 2px 6px;
@@ -31,7 +36,9 @@ window {
     margin: 6px;
     /* Clip children (thumbnail, overlays) to the rounded corners. */
     background-clip: padding-box;
-    transition: box-shadow 300ms ease, border-color 300ms ease;
+    transition:
+        box-shadow 300ms ease,
+        border-color 300ms ease;
 }
 
 .media-card:hover {
@@ -87,10 +94,12 @@ window {
 /* Bottom gradient info overlay, revealed on hover */
 .media-card .card-info {
     padding: 10px 12px;
-    background: linear-gradient(to top,
+    background: linear-gradient(
+        to top,
         rgba(15, 15, 22, 0.95) 0%,
         rgba(15, 15, 22, 0.35) 55%,
-        rgba(15, 15, 22, 0.0) 100%);
+        rgba(15, 15, 22, 0) 100%
+    );
     opacity: 0;
     transition: opacity 300ms ease;
 }
@@ -163,4 +172,86 @@ window {
     background-color: rgba(239, 68, 68, 0.18);
     color: #fca5a5;
     border: 1px solid rgba(239, 68, 68, 0.35);
+}
+
+/* --- Video player overlay controls --- */
+.video-controls,
+.video-topbar {
+    border-radius: 12px;
+    padding: 6px 10px;
+}
+
+.video-controls {
+    background: linear-gradient(
+        to top,
+        rgba(10, 10, 16, 0.9) 0%,
+        rgba(10, 10, 16, 0.5) 65%,
+        rgba(10, 10, 16, 0) 100%
+    );
+}
+
+.video-topbar {
+    background: linear-gradient(
+        to bottom,
+        rgba(10, 10, 16, 0.9) 0%,
+        rgba(10, 10, 16, 0.5) 65%,
+        rgba(10, 10, 16, 0) 100%
+    );
+}
+
+.video-topbar label {
+    color: rgba(255, 255, 255, 0.85);
+}
+
+.video-controls .video-btn {
+    min-width: 34px;
+    min-height: 34px;
+    padding: 0;
+    border-radius: 999px;
+    color: #e5e7eb;
+    background: rgba(255, 255, 255, 0.07);
+}
+
+.video-controls .video-btn:hover {
+    background: rgba(255, 255, 255, 0.16);
+    color: #ffffff;
+}
+
+.video-controls .video-btn:active {
+    background: rgba(99, 102, 241, 0.5);
+    color: #ffffff;
+}
+
+.video-controls .video-btn:disabled {
+    opacity: 0.4;
+    background: rgba(255, 255, 255, 0.04);
+}
+
+.video-controls .video-time {
+    color: rgba(255, 255, 255, 0.85);
+    font-feature-settings: "tnum";
+}
+
+.video-controls .video-seek trough {
+    min-height: 5px;
+    border-radius: 3px;
+    background-color: rgba(255, 255, 255, 0.18);
+}
+
+.video-controls .video-seek trough highlight {
+    min-height: 5px;
+    border-radius: 3px;
+    background-color: #6366f1;
+}
+
+.video-controls .video-seek slider {
+    min-width: 14px;
+    min-height: 14px;
+    border-radius: 999px;
+    background-color: #a5b4fc;
+    border: none;
+}
+
+.video-controls .video-seek:disabled trough {
+    background-color: rgba(255, 255, 255, 0.08);
 }

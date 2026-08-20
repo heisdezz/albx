@@ -1,14 +1,16 @@
 import os
-import sqlite3
-from gi.repository import Gtk, GLib, Adw
+
+from gi.repository import Adw, GLib, Gtk
+from router import get_router
+
 from core.database import open_readable_db
 from core.scanner import active_scans
-from core.thumbnails import get_or_generate_thumbnail
-from router import get_router
-import threading
+from ui.widgets.media_card import MediaCard
+
 
 def escape_markup(text: str) -> str:
     return GLib.markup_escape_text(str(text or ""))
+
 
 class DashboardView(Gtk.Box):
     """
@@ -16,6 +18,7 @@ class DashboardView(Gtk.Box):
     Shows: drive header, stat cards (total media, total albums, storage used),
     recently added media thumbnails, and recent albums list.
     """
+
     def __init__(self, parent_window, drive):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=16)
         self.parent_window = parent_window
@@ -41,16 +44,13 @@ class DashboardView(Gtk.Box):
         scroll.set_vexpand(True)
         self.append(scroll)
 
-        clamp = Adw.Clamp()
-        clamp.set_maximum_size(900)
-        scroll.set_child(clamp)
-
+        # Full-width layout (no clamp) so the dashboard uses all available space.
         self.layout = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=24)
         self.layout.set_margin_start(8)
         self.layout.set_margin_end(8)
         self.layout.set_margin_top(8)
         self.layout.set_margin_bottom(24)
-        clamp.set_child(self.layout)
+        scroll.set_child(self.layout)
 
         # --- DRIVE HEADER PANEL ---
         header_card = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
@@ -59,7 +59,11 @@ class DashboardView(Gtk.Box):
         icon_box = Gtk.Box()
         icon_box.set_size_request(48, 48)
         icon_box.set_valign(Gtk.Align.CENTER)
-        drive_icon_name = "drive-harddisk-usb-symbolic" if (self.drive or {}).get("type") == "external" else "drive-harddisk-symbolic"
+        drive_icon_name = (
+            "drive-harddisk-usb-symbolic"
+            if (self.drive or {}).get("type") == "external"
+            else "drive-harddisk-symbolic"
+        )
         drive_icon = Gtk.Image.new_from_icon_name(drive_icon_name)
         drive_icon.set_pixel_size(28)
         icon_box.append(drive_icon)
@@ -73,7 +77,9 @@ class DashboardView(Gtk.Box):
         drive_size = (self.drive or {}).get("size", "")
 
         name_lbl = Gtk.Label()
-        name_lbl.set_markup(f"<span size='x-large' weight='black'>{escape_markup(drive_name)}</span>")
+        name_lbl.set_markup(
+            f"<span size='x-large' weight='black'>{escape_markup(drive_name)}</span>"
+        )
         name_lbl.set_halign(Gtk.Align.START)
         info_box.append(name_lbl)
 
@@ -89,7 +95,9 @@ class DashboardView(Gtk.Box):
         action_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         action_box.set_valign(Gtk.Align.CENTER)
 
-        self.scan_status_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self.scan_status_box = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL, spacing=6
+        )
         self.scan_status_box.set_visible(False)
         scan_spinner = Gtk.Spinner()
         scan_spinner.start()
@@ -102,7 +110,9 @@ class DashboardView(Gtk.Box):
         scan_btn = Gtk.Button(label="Scan Volume")
         scan_btn.set_icon_name("system-search-symbolic")
         scan_btn.add_css_class("flat")
-        scan_btn.connect("clicked", lambda b: get_router().navigate("/scan", {"drive": self.drive}))
+        scan_btn.connect(
+            "clicked", lambda b: get_router().navigate("/scan", {"drive": self.drive})
+        )
         action_box.append(scan_btn)
 
         refresh_btn = Gtk.Button()
@@ -133,6 +143,7 @@ class DashboardView(Gtk.Box):
         # Card 3: Storage Used
         storage_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         storage_card.add_css_class("card")
+        storage_card.add_css_class("stat-card")
         storage_card.set_hexpand(True)
 
         storage_hdr = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
@@ -174,7 +185,9 @@ class DashboardView(Gtk.Box):
 
         view_all_btn = Gtk.Button(label="View All Media →")
         view_all_btn.add_css_class("flat")
-        view_all_btn.connect("clicked", lambda b: get_router().navigate("/media", {"drive": self.drive}))
+        view_all_btn.connect(
+            "clicked", lambda b: get_router().navigate("/media", {"drive": self.drive})
+        )
         media_hdr.append(view_all_btn)
         media_section.append(media_hdr)
 
@@ -187,12 +200,17 @@ class DashboardView(Gtk.Box):
         self.recent_media_flow.set_column_spacing(10)
         self.recent_media_flow.set_max_children_per_line(8)
         self.recent_media_flow.set_min_children_per_line(3)
+        self.recent_media_flow.connect(
+            "child-activated", self._on_recent_media_activated
+        )
         media_section.append(self.recent_media_flow)
 
         self.no_media_status = Adw.StatusPage()
         self.no_media_status.set_icon_name("camera-photo-symbolic")
         self.no_media_status.set_title("No Media Found")
-        self.no_media_status.set_description("This volume has not been scanned yet. Use Discover Scan to index files.")
+        self.no_media_status.set_description(
+            "This volume has not been scanned yet. Use Discover Scan to index files."
+        )
         self.no_media_status.set_visible(False)
         media_section.append(self.no_media_status)
 
@@ -210,7 +228,9 @@ class DashboardView(Gtk.Box):
 
         view_albums_btn = Gtk.Button(label="View All Albums →")
         view_albums_btn.add_css_class("flat")
-        view_albums_btn.connect("clicked", lambda b: get_router().navigate("/albums", {"drive": self.drive}))
+        view_albums_btn.connect(
+            "clicked", lambda b: get_router().navigate("/albums", {"drive": self.drive})
+        )
         albums_hdr.append(view_albums_btn)
         albums_section.append(albums_hdr)
 
@@ -225,7 +245,9 @@ class DashboardView(Gtk.Box):
         self.no_albums_status = Adw.StatusPage()
         self.no_albums_status.set_icon_name("folder-symbolic")
         self.no_albums_status.set_title("No Albums Found")
-        self.no_albums_status.set_description("Scanning will auto-group media into album folders.")
+        self.no_albums_status.set_description(
+            "Scanning will auto-group media into album folders."
+        )
         self.no_albums_status.set_visible(False)
         albums_section.append(self.no_albums_status)
 
@@ -234,6 +256,7 @@ class DashboardView(Gtk.Box):
     def _make_stat_card(self, icon_name, title, value):
         outer = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         outer.add_css_class("card")
+        outer.add_css_class("stat-card")
         outer.set_hexpand(True)
 
         icon = Gtk.Image.new_from_icon_name(icon_name)
@@ -335,68 +358,15 @@ class DashboardView(Gtk.Box):
         self.recent_media_flow.set_visible(True)
 
         for item in self.recent_media:
-            card = self._make_media_thumb(item)
+            card = MediaCard(item, self.drive["path"], lambda item_id, selected: None)
             self.recent_media_flow.append(card)
 
-    def _make_media_thumb(self, item):
-        """Small thumbnail card for recent media preview."""
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        box.add_css_class("card")
-        box.set_size_request(120, 120)
-
-        overlay = Gtk.Overlay()
-        overlay.set_hexpand(True)
-        overlay.set_vexpand(True)
-
-        # Placeholder
-        is_video = item["mime_type"].startswith("video/")
-        ph_icon = Gtk.Image.new_from_icon_name(
-            "video-x-generic-symbolic" if is_video else "image-x-generic-symbolic"
-        )
-        ph_icon.set_pixel_size(32)
-        ph_icon.add_css_class("dim-label")
-        ph_icon.set_valign(Gtk.Align.CENTER)
-        ph_icon.set_halign(Gtk.Align.CENTER)
-        overlay.set_child(ph_icon)
-
-        # Thumbnail picture
-        picture = Gtk.Picture()
-        picture.set_content_fit(Gtk.ContentFit.COVER)
-        picture.set_hexpand(True)
-        picture.set_vexpand(True)
-        overlay.add_overlay(picture)
-
-        box.append(overlay)
-
-        # Filename label
-        filename = os.path.basename(item["current_relative_path"])
-        name_lbl = Gtk.Label(label=filename)
-        name_lbl.set_ellipsize(3)
-        name_lbl.set_max_width_chars(14)
-        name_lbl.add_css_class("caption")
-        name_lbl.add_css_class("dim-label")
-        box.append(name_lbl)
-
-        # Async thumbnail load
-        file_hash = item.get("file_hash", "")
-        thumb_path = os.path.join(self.drive["path"], "albums", "thumbs", f"{file_hash}.jpg")
-        full_media_path = os.path.join(self.drive["path"], item["current_relative_path"])
-
-        def load_thumb():
-            success = get_or_generate_thumbnail(full_media_path, thumb_path)
-            if success and os.path.exists(thumb_path):
-                GLib.idle_add(picture.set_filename, thumb_path)
-
-        threading.Thread(target=load_thumb, daemon=True).start()
-
-        # Click to open detail
-        gesture = Gtk.GestureClick()
-        gesture.connect("released", lambda g, n, x, y, i=item: get_router().navigate(
-            "/media_detail", {"item": i, "drive": self.drive}
-        ))
-        box.add_controller(gesture)
-
-        return box
+    def _on_recent_media_activated(self, flowbox, child):
+        card = child.get_child()
+        if card and hasattr(card, "item"):
+            get_router().navigate(
+                "/media_detail", {"item": card.item, "drive": self.drive}
+            )
 
     def _render_recent_albums(self):
         while True:
@@ -414,13 +384,17 @@ class DashboardView(Gtk.Box):
         self.albums_list.set_visible(True)
 
         for album in self.recent_albums:
-            display_name = "Unsorted Media" if album["name"] == "unknown" else album["name"]
+            display_name = (
+                "Unsorted Media" if album["name"] == "unknown" else album["name"]
+            )
             media_count = album.get("media_count", 0)
             created = str(album.get("created_at", ""))[:10]
 
             row = Adw.ActionRow()
-            row.set_title(escape_markup(display_name))
-            row.set_subtitle(f"{media_count} item{'s' if media_count != 1 else ''} · Created {created}")
+            row.set_title(display_name)
+            row.set_subtitle(
+                f"{media_count} item{'s' if media_count != 1 else ''} · Created {created}"
+            )
             row.add_prefix(Gtk.Image.new_from_icon_name("folder-symbolic"))
 
             arrow = Gtk.Image.new_from_icon_name("go-next-symbolic")

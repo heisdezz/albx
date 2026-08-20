@@ -74,7 +74,9 @@ def delete_media_items(drive_path: str, ids: list[int]) -> tuple[int, list[str]]
         # Only remove DB rows for files that were actually deleted from disk.
         if deleted_ids:
             ph = ",".join("?" * len(deleted_ids))
-            conn.execute(f"DELETE FROM media_tags WHERE media_id IN ({ph})", deleted_ids)
+            conn.execute(
+                f"DELETE FROM media_tags WHERE media_id IN ({ph})", deleted_ids
+            )
             conn.execute(f"DELETE FROM media_items WHERE id IN ({ph})", deleted_ids)
             conn.commit()
         return len(deleted_ids), errors
@@ -163,21 +165,30 @@ def move_media_items(
         conn.close()
 
 
-def create_album(drive_path: str, name: str) -> tuple[bool, str]:
-    """Create a new album folder on disk and insert a record into the database.
-
-    Returns (success, error_message).
-    """
+def _validate_album_name(name: str) -> tuple[bool, str]:
+    """Validate an album folder name. Returns (ok, error_message)."""
     if not name:
         return False, "Album name cannot be empty."
 
     # Check for invalid characters in folder name
-    invalid_chars = ['/', '\\', ':', '*', '?', '"', '<', '>', '|']
+    invalid_chars = ["/", "\\", ":", "*", "?", '"', "<", ">", "|"]
     if any(c in name for c in invalid_chars):
         return False, "Album name contains invalid characters."
 
     if name.lower() == "unknown":
         return False, "The name 'unknown' is reserved."
+
+    return True, ""
+
+
+def create_album(drive_path: str, name: str) -> tuple[bool, str]:
+    """Create a new album folder on disk and insert a record into the database.
+
+    Returns (success, error_message).
+    """
+    ok, err = _validate_album_name(name)
+    if not ok:
+        return False, err
 
     db_path = get_db_path(drive_path)
     conn = get_database_connection(db_path)
@@ -200,7 +211,7 @@ def create_album(drive_path: str, name: str) -> tuple[bool, str]:
         # Insert into database
         cursor.execute(
             "INSERT INTO albums (name, relative_path, description) VALUES (?, ?, ?)",
-            (name, album_rel_path, f"Custom album: {name}")
+            (name, album_rel_path, f"Custom album: {name}"),
         )
         conn.commit()
         return True, ""
@@ -209,6 +220,150 @@ def create_album(drive_path: str, name: str) -> tuple[bool, str]:
         return False, str(e)
     finally:
         conn.close()
+
+
+def rename_album(drive_path: str, album_id: int, new_name: str) -> tuple[bool, str]:
+    """Rename an album folder on disk and rewrite the affected media paths.
+
+    Returns (success, error_message).
+    """
+    new_name = new_name.strip()
+    ok, err = _validate_album_name(new_name)
+    if not ok:
+        return False, err
+
+    db_path = get_db_path(drive_path)
+    conn = get_database_connection(db_path)
+    if not conn:
+        return False, "Could not open the media library database."
+
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT name, relative_path FROM albums WHERE id = ?", (album_id,)
+        )
+        row = cursor.fetchone()
+        if not row:
+            return False, "Album not found."
+        old_name, old_rel = row["name"], row["relative_path"]
+
+        if old_name == new_name:
+            return True, ""
+
+        cursor.execute("SELECT id FROM albums WHERE name = ?", (new_name,))
+        if cursor.fetchone():
+            return False, f"An album named '{new_name}' already exists."
+
+        new_rel = os.path.join("albums", new_name)
+        old_full = os.path.join(drive_path, old_rel)
+        new_full = os.path.join(drive_path, new_rel)
+
+        if os.path.exists(old_full):
+            if os.path.exists(new_full):
+                return (
+                    False,
+                    f"A folder named '{new_name}' already exists on the drive.",
+                )
+            os.rename(old_full, new_full)
+
+        # Rewrite media paths that live under the old album folder.
+        old_prefix = old_rel + os.sep
+        for mrow in cursor.execute(
+            "SELECT id, current_relative_path FROM media_items WHERE album_id = ?",
+            (album_id,),
+        ).fetchall():
+            rel = mrow["current_relative_path"]
+            if rel.startswith(old_prefix):
+                sub = rel[len(old_prefix) :]
+                cursor.execute(
+                    "UPDATE media_items SET current_relative_path = ? WHERE id = ?",
+                    (os.path.join(new_rel, sub), mrow["id"]),
+                )
+
+        cursor.execute(
+            "UPDATE albums SET name = ?, relative_path = ? WHERE id = ?",
+            (new_name, new_rel, album_id),
+        )
+        conn.commit()
+        return True, ""
+    except Exception as e:
+        conn.rollback()
+        return False, str(e)
+    finally:
+        conn.close()
+
+
+def merge_albums(
+    drive_path: str, source_album_id: int, target_album_id: int
+) -> tuple[bool, str, list[str]]:
+    """Move all media from the source album into the target album, then remove it.
+
+    The source album folder is removed once its media have been moved out.
+    Returns (success, error_message, file_errors).
+    """
+    if source_album_id == target_album_id:
+        return False, "Cannot merge an album into itself.", []
+
+    db_path = get_db_path(drive_path)
+    conn = get_database_connection(db_path)
+    if not conn:
+        return False, "Could not open the media library database.", []
+
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT name, relative_path FROM albums WHERE id = ?", (source_album_id,)
+        )
+        src = cursor.fetchone()
+        if not src:
+            return False, "Source album not found.", []
+        if src["name"] == "unknown":
+            return (
+                False,
+                "The default Unsorted Media album cannot be merged into another album.",
+                [],
+            )
+
+        cursor.execute("SELECT id FROM albums WHERE id = ?", (target_album_id,))
+        if not cursor.fetchone():
+            return False, "Target album not found.", []
+
+        media_ids = [
+            r[0]
+            for r in cursor.execute(
+                "SELECT id FROM media_items WHERE album_id = ?", (source_album_id,)
+            ).fetchall()
+        ]
+        src_rel = src["relative_path"]
+        conn.close()
+        conn = None
+
+        # move_media_items manages its own connection.
+        errors: list[str] = []
+        if media_ids:
+            _, errors = move_media_items(drive_path, media_ids, target_album_id)
+
+        # Remove the source album row and its (now empty) folder.
+        conn = get_database_connection(db_path)
+        conn.execute("DELETE FROM albums WHERE id = ?", (source_album_id,))
+        conn.commit()
+
+        src_full = os.path.join(drive_path, src_rel)
+        if os.path.exists(src_full):
+            try:
+                os.rmdir(src_full)
+            except OSError:
+                # Folder still holds stray (uncatalogued) files: leave it be.
+                pass
+
+        return True, "", errors
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        return False, str(e), []
+    finally:
+        if conn:
+            conn.close()
 
 
 def delete_album(
@@ -229,7 +384,9 @@ def delete_album(
     try:
         cursor = conn.cursor()
         # Check if the album exists and is not 'unknown'
-        cursor.execute("SELECT name, relative_path FROM albums WHERE id = ?", (album_id,))
+        cursor.execute(
+            "SELECT name, relative_path FROM albums WHERE id = ?", (album_id,)
+        )
         row = cursor.fetchone()
         if not row:
             return False, "Album not found.", []
@@ -262,7 +419,9 @@ def delete_album(
                 # Must close current conn first as move_media_items manages its own connection.
                 conn.close()
                 conn = None
-                moved_count, errors = move_media_items(drive_path, media_ids, unknown_album_id)
+                moved_count, errors = move_media_items(
+                    drive_path, media_ids, unknown_album_id
+                )
 
         # Re-open connection to delete the album row
         if not conn:

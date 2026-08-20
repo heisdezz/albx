@@ -8,41 +8,61 @@ from core.logger import get_logs
 from core.scanner import ScanState, active_scans, walk_directory
 from router import get_router
 
+DEFAULT_IGNORES = [
+    "temp",
+    "cache",
+    "raw",
+    "backups",
+    "archive",
+    "node_modules",
+    "dist",
+    "build",
+]
+
+SETTINGS_DIR = os.path.join(os.path.expanduser("~/.config"), "antigravity_drive_media")
+IGNORE_LISTS_FILE = os.path.join(SETTINGS_DIR, "ignore_lists.json")
+
 
 def escape_markup(text: str) -> str:
     return GLib.markup_escape_text(str(text or ""))
 
 
 def load_ignore_list(drive_path: str) -> list:
-    settings_file = os.path.join(drive_path, "albums", ".media_library_settings.json")
-    default_ignores = [
-        "temp",
-        "cache",
-        "raw",
-        "backups",
-        "archive",
-        "node_modules",
-        "dist",
-        "build",
-    ]
-    if os.path.exists(settings_file):
+    # Current in-app storage, keyed by drive path.
+    try:
+        with open(IGNORE_LISTS_FILE, "r") as f:
+            data = json.load(f)
+            if drive_path in data and isinstance(data[drive_path], list):
+                return data[drive_path]
+    except Exception:
+        pass
+
+    # Legacy: the list used to be stored inside the drive's album dir.
+    legacy_file = os.path.join(drive_path, "albums", ".media_library_settings.json")
+    if os.path.exists(legacy_file):
         try:
-            with open(settings_file, "r") as f:
+            with open(legacy_file, "r") as f:
                 data = json.load(f)
-                return data.get("ignoreList", default_ignores)
+                return data.get("ignoreList", DEFAULT_IGNORES)
         except Exception:
-            return default_ignores
-    return default_ignores
+            return DEFAULT_IGNORES
+    return DEFAULT_IGNORES
 
 
 def save_ignore_list(drive_path: str, ignore_list: list) -> None:
-    settings_file = os.path.join(drive_path, "albums", ".media_library_settings.json")
-    os.makedirs(os.path.dirname(settings_file), exist_ok=True)
+    data = {}
     try:
-        with open(settings_file, "w") as f:
-            json.dump({"ignoreList": ignore_list}, f)
+        with open(IGNORE_LISTS_FILE, "r") as f:
+            data = json.load(f)
+    except Exception:
+        data = {}
+    data[drive_path] = ignore_list
+    os.makedirs(SETTINGS_DIR, exist_ok=True)
+    try:
+        with open(IGNORE_LISTS_FILE, "w") as f:
+            json.dump(data, f, indent=2)
     except Exception as e:
-        print(f"[Settings] Failed to save settings: {e}")
+        print(f"[Settings] Failed to save ignore list: {e}")
 
 
 class DiscoverView(Gtk.Box):
@@ -186,6 +206,14 @@ class DiscoverView(Gtk.Box):
         self.ignore_entry_row.connect("apply", self.on_add_rule_applied)
         ignore_group.add(self.ignore_entry_row)
 
+        # System folder picker button
+        pick_btn = Gtk.Button()
+        pick_btn.set_icon_name("folder-open-symbolic")
+        pick_btn.set_tooltip_text("Pick Folder to Ignore")
+        pick_btn.add_css_class("flat")
+        pick_btn.connect("clicked", self.on_pick_folder_clicked)
+        self.ignore_entry_row.add_suffix(pick_btn)
+
         # Active Chips Box inside card
         chips_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         chips_card.add_css_class("card")
@@ -276,13 +304,16 @@ class DiscoverView(Gtk.Box):
             lbl.add_css_class("chip-label")
             chip_box.append(lbl)
 
-            del_btn = Gtk.Button()
-            del_btn.set_icon_name("window-close-symbolic")
-            del_btn.add_css_class("flat")
-            del_btn.add_css_class("chip-close")
-            del_btn.set_valign(Gtk.Align.CENTER)
-            del_btn.connect("clicked", lambda x, p=pattern: self.remove_ignore_rule(p))
-            chip_box.append(del_btn)
+            if pattern in DEFAULT_IGNORES:
+                chip_box.add_css_class("dim-label")
+            else:
+                del_btn = Gtk.Button()
+                del_btn.set_icon_name("window-close-symbolic")
+                del_btn.add_css_class("flat")
+                del_btn.add_css_class("chip-close")
+                del_btn.set_valign(Gtk.Align.CENTER)
+                del_btn.connect("clicked", lambda x, p=pattern: self.remove_ignore_rule(p))
+                chip_box.append(del_btn)
 
             self.chips_flow.append(chip_box)
 
@@ -298,6 +329,8 @@ class DiscoverView(Gtk.Box):
     def remove_ignore_rule(self, pattern):
         if not self.drive:
             return
+        if pattern in DEFAULT_IGNORES:
+            return
         if pattern in self.ignore_list:
             self.ignore_list.remove(pattern)
             save_ignore_list(self.drive["path"], self.ignore_list)
@@ -308,6 +341,64 @@ class DiscoverView(Gtk.Box):
         if text:
             self.add_ignore_rule(text)
             entry_row.set_text("")
+
+    def on_pick_folder_clicked(self, btn):
+        if not self.drive:
+            return
+        drive_path = self.drive["path"]
+
+        def on_folder_selected(folder_path):
+            if not folder_path:
+                return
+            rel = os.path.relpath(folder_path, drive_path)
+            if rel in (".", ""):
+                return
+            if rel.startswith(".."):
+                # Picked folder is outside the drive; fall back to its name.
+                rel = os.path.basename(folder_path)
+
+            entry = rel.replace(os.sep, "/")
+            if entry and entry not in self.ignore_list:
+                self.ignore_list.append(entry)
+                save_ignore_list(drive_path, self.ignore_list)
+                self.render_chips()
+
+        self.select_folder_dialog("Select a folder to ignore", on_folder_selected)
+
+    def select_folder_dialog(self, title, callback):
+        if hasattr(Gtk, "FileDialog"):
+            dialog = Gtk.FileDialog.new()
+            dialog.set_title(title)
+
+            def on_finish(source, result):
+                try:
+                    gfile = source.select_folder_finish(result)
+                    path = gfile.get_path()
+                    GLib.idle_add(callback, path)
+                except Exception:
+                    GLib.idle_add(callback, None)
+
+            dialog.select_folder(self.parent_window, None, on_finish)
+        else:
+            dialog = Gtk.FileChooserNative.new(
+                title,
+                self.parent_window,
+                Gtk.FileChooserAction.SELECT_FOLDER,
+                "Select",
+                "Cancel"
+            )
+
+            def on_response(dialog, response_id):
+                if response_id == Gtk.ResponseType.ACCEPT:
+                    gfile = dialog.get_file()
+                    path = gfile.get_path() if gfile else None
+                    GLib.idle_add(callback, path)
+                else:
+                    GLib.idle_add(callback, None)
+                dialog.destroy()
+
+            dialog.connect("response", on_response)
+            dialog.show()
 
     def on_action_clicked(self, btn):
         if not self.drive:
