@@ -140,8 +140,15 @@ Native Linux Python GTK 4 application for scanning, organizing, previewing, and 
 # Install dependencies
 uv sync
 
-# Launch GTK 4 Application
+# Launch GTK 4 Application (default)
 python main.py
+
+# Launch Standalone Headless Sync Server (no GUI)
+python main.py --server
+python main.py --server --port 8080 --drive /path/to/drive
+
+# Launch Qt Frontend
+python main.py --qt
 ```
 
 ### Running Type & Lint Checks

@@ -13,9 +13,9 @@ This document explains how to connect mobile devices (Android, iOS) over your lo
 
 ## Step-by-Step Setup Instructions
 
-### 1. Enable Mobile Sync Server in GTK Settings
+### 1. Enable Mobile Sync Server via GUI (GTK Settings)
 
-1. Launch the **External Drive Media Organizer** GTK 4 application.
+1. Launch the **External Drive Media Organizer** GTK 4 application (`python main.py`).
 2. Click **Settings** in the left sidebar navigation.
 3. Scroll down to the **Local Network Mobile Sync** section.
 4. Toggle **Enable Mobile Sync Server** to **ON**.
@@ -31,6 +31,20 @@ http://192.168.x.x:8080/download/db
 ```
 
 Click the **Copy URL** button to copy the download link to your clipboard.
+
+### 2. Or Start Headless Server via CLI (`--server`)
+
+You can also run the sync server standalone without starting the GUI (e.g. on headless machines, Raspberry Pi, or background terminal):
+
+```bash
+# Auto-detect connected media drive on port 8080
+python main.py --server
+
+# Specify custom port and drive path
+python main.py --server --port 8080 --drive /path/to/drive
+```
+
+This immediately outputs the network IP and endpoint addresses to the console.
 
 ---
 
