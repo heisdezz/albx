@@ -58,6 +58,7 @@ Native Linux Python GTK 4 application for scanning, organizing, previewing, and 
 ├── mobile_connection.md         # Guide for mobile device local network sync & DB download
 ├── progress.md                  # Milestone status tracking and task checklist
 ├── pyproject.toml               # Python dependencies and project configuration
+├── SCHEMA.md                    # Database schema reference, ERD, triggers & query guide
 └── main.py                      # Root launcher script
 ```
 
