@@ -23,6 +23,7 @@ This document tracks the live implementation progress of the **External Drive Me
 | **M6** | GTK 4 App Shell & CSS (`gui.py`, `style.css`) | 🟢 Completed | 100% |
 | **M7** | GTK 4 UI Views (`views/*`) | 🟢 Completed | 100% |
 | **M8** | Consolidation & End-to-End Tests | 🟢 Completed | 100% |
+| **M9** | Mobile Local Network Sync (`sync_server.py`) | 🟢 Completed | 100% |
 
 ---
 

@@ -1,4 +1,9 @@
 import sys
+import os
+
+drive_gtk_dir = os.path.dirname(os.path.abspath(__file__))
+if drive_gtk_dir not in sys.path:
+    sys.path.insert(0, drive_gtk_dir)
 
 import gi
 

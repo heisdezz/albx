@@ -1,10 +1,19 @@
 import os
 import json
 import threading
-from gi.repository import Gtk, GLib, Adw
+from gi.repository import Gtk, Gdk, GLib, Adw
 from core.gdrive import test_gdrive_connection, backup_to_gdrive
 from core.database import create_backup, backup_dir_for
-from ui.views.discover import load_ignore_list, save_ignore_list
+from core.sync_server import (
+    get_sync_server_manager,
+    start_mobile_sync_server,
+    stop_mobile_sync_server,
+    get_mobile_sync_status
+)
+try:
+    from drive_gtk.ui.views.discover import load_ignore_list, save_ignore_list
+except ImportError:
+    from ui.views.discover import load_ignore_list, save_ignore_list
 
 DEFAULT_PAGE_SIZE = 24
 PAGE_SIZE_OPTIONS = [12, 24, 48, 96]
@@ -160,13 +169,67 @@ class SettingsView(Gtk.Box):
         
         local_group.add(self.backups_list)
         layout.append(local_group)
+
+        # LOCAL NETWORK MOBILE SYNC PANEL
+        mobile_group = Adw.PreferencesGroup()
+        mobile_group.set_title("Local Network Mobile Sync")
+        mobile_group.set_description("Serve database snapshots over local Wi-Fi / LAN for mobile devices.")
+        
+        sync_switch_row = Adw.ActionRow()
+        sync_switch_row.set_title("Enable Mobile Sync Server")
+        sync_switch_row.set_subtitle("Run background HTTP server for LAN database downloads.")
+        sync_switch_row.add_prefix(Gtk.Image.new_from_icon_name("network-wireless-symbolic"))
+        
+        self.sync_switch = Gtk.Switch()
+        self.sync_switch.set_valign(Gtk.Align.CENTER)
+        self.sync_switch.connect("state-set", self.on_sync_switch_toggled)
+        sync_switch_row.add_suffix(self.sync_switch)
+        mobile_group.add(sync_switch_row)
+
+        port_row = Adw.ActionRow()
+        port_row.set_title("Server Port")
+        port_row.set_subtitle("Port number for local HTTP network server.")
+        port_row.add_prefix(Gtk.Image.new_from_icon_name("preferences-system-network-symbolic"))
+
+        self.port_entry = Gtk.Entry()
+        self.port_entry.set_text("8080")
+        self.port_entry.set_width_chars(6)
+        self.port_entry.set_alignment(0.5)
+        self.port_entry.set_valign(Gtk.Align.CENTER)
+        port_row.add_suffix(self.port_entry)
+        mobile_group.add(port_row)
+
+        self.server_status_lbl = Gtk.Label()
+        self.server_status_lbl.set_halign(Gtk.Align.START)
+        self.server_status_lbl.set_markup("<span foreground='#888888'>● Server is offline</span>")
+
+        url_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.url_entry = Gtk.Entry()
+        self.url_entry.set_editable(False)
+        self.url_entry.set_hexpand(True)
+        self.url_entry.set_placeholder_text("Turn on sync server to generate download URL")
+
+        copy_btn = Gtk.Button(label="Copy URL")
+        copy_btn.add_css_class("flat")
+        copy_btn.connect("clicked", self.on_copy_sync_url_clicked)
+        url_box.append(self.url_entry)
+        url_box.append(copy_btn)
+
+        mobile_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        mobile_box.append(self.server_status_lbl)
+        mobile_box.append(url_box)
+
+        mobile_group.add(mobile_box)
+        layout.append(mobile_group)
         
     def load_settings(self):
         if not self.drive:
+            self.update_sync_server_ui()
             return
         settings_file = os.path.join(self.drive["path"], "albums", ".media_library_settings.json")
         if not os.path.exists(settings_file):
             self.page_size_combo.set_active_id(str(DEFAULT_PAGE_SIZE))
+            self.update_sync_server_ui()
             return
             
         try:
@@ -184,8 +247,71 @@ class SettingsView(Gtk.Box):
             
             saved_ps = str(data.get("itemsPerPage", DEFAULT_PAGE_SIZE))
             self.page_size_combo.set_active_id(saved_ps)
+
+            # Load Mobile Sync Server preferences
+            sync_port = str(data.get("syncServerPort", 8080))
+            self.port_entry.set_text(sync_port)
+
+            sync_enabled = data.get("syncServerEnabled", False)
+            if sync_enabled and not get_mobile_sync_status().get("is_running"):
+                try:
+                    port = int(sync_port)
+                except ValueError:
+                    port = 8080
+                start_mobile_sync_server(self.drive["path"], port)
         except Exception as e:
             print(f"[Settings] Failed to load settings: {e}")
+        finally:
+            self.update_sync_server_ui()
+
+    def update_sync_server_ui(self):
+        status = get_mobile_sync_status()
+        if status.get("is_running"):
+            url = status.get("download_url", "")
+            self.url_entry.set_text(url or "")
+            self.server_status_lbl.set_markup(
+                f"<span foreground='#10b981' weight='bold'>● Server Active on {status.get('ip')}:{status.get('port')}</span>"
+            )
+            self.sync_switch.set_active(True)
+        else:
+            self.url_entry.set_text("")
+            self.server_status_lbl.set_markup("<span foreground='#888888'>● Server is offline</span>")
+            self.sync_switch.set_active(False)
+
+    def on_sync_switch_toggled(self, switch, state):
+        if not self.drive:
+            self.status_lbl.set_markup("<span foreground='#ef4444'>✗ Select an active drive first to start sync server.</span>")
+            switch.set_active(False)
+            return False
+
+        port_str = self.port_entry.get_text().strip()
+        try:
+            port = int(port_str)
+        except ValueError:
+            port = 8080
+            self.port_entry.set_text("8080")
+
+        self._save_setting("syncServerEnabled", state)
+        self._save_setting("syncServerPort", port)
+
+        if state:
+            res = start_mobile_sync_server(self.drive["path"], port)
+            if not res.get("success", False):
+                self.status_lbl.set_markup(f"<span foreground='#ef4444'>✗ Failed to start server: {escape_markup(res.get('error', 'Unknown'))}</span>")
+        else:
+            stop_mobile_sync_server()
+
+        self.update_sync_server_ui()
+        return False
+
+    def on_copy_sync_url_clicked(self, btn):
+        url = self.url_entry.get_text().strip()
+        if url:
+            clipboard = Gdk.Display.get_default().get_clipboard()
+            clipboard.set(url)
+            self.status_lbl.set_markup("<span foreground='#10b981'>✓ Mobile sync download URL copied to clipboard!</span>")
+        else:
+            self.status_lbl.set_markup("<span foreground='#ef4444'>✗ Enable Mobile Sync Server first to generate URL.</span>")
 
     def on_page_size_changed(self, combo):
         """Persist the new items-per-page choice immediately."""
