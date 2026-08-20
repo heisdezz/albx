@@ -35,7 +35,7 @@ Native Linux Python GTK 4 application for scanning, organizing, previewing, and 
 │   ├── logger.py                # Centralized logging & thread-safe event streaming
 │   ├── media_ops.py             # Consolidation engine, metadata extraction & hash deduplication
 │   ├── scanner.py               # Non-blocking directory walker & path ignore list filter
-│   ├── sync_server.py           # Threaded HTTP server for LAN mobile connection & DB download
+│   ├── sync_server.py           # Threaded HTTP server for LAN mobile DB sync, video streaming & thumbnails
 │   └── thumbnails.py            # Pillow image & FFmpeg VAAPI video thumbnail generator
 ├── drive_gtk/                   # GTK 4 Native Frontend Application
 │   ├── main.py                  # GTK App Entrypoint & Window initializer
