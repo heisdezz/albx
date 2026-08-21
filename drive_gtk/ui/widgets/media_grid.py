@@ -163,6 +163,7 @@ class MediaGridView(Gtk.Box):
             on_filters_changed=self.on_filters_changed,
             on_select_toggled=self.on_select_mode_changed,
             on_select_all=self.on_select_all,
+            on_validate=self.on_validate_clicked,
         )
 
         self.build_ui()
@@ -708,3 +709,43 @@ class MediaGridView(Gtk.Box):
             GLib.idle_add(on_finished)
 
         threading.Thread(target=run_delete, daemon=True).start()
+
+    def on_validate_clicked(self):
+        if not self.drive:
+            return
+
+        album_id = self.filter_album_id
+
+        def run_validate():
+            from core.media_ops import validate_album_files
+            return validate_album_files(self.drive["path"], album_id)
+
+        def on_finished(result):
+            total, removed, errors = result
+            self.load_data()
+            dialog = Gtk.AlertDialog()
+            if errors:
+                dialog.set_message("Validation Finished with Errors")
+                dialog.set_detail("\n".join(errors[:8]))
+            elif removed > 0:
+                dialog.set_message("Validation Complete")
+                dialog.set_detail(
+                    f"Validated {total} media items.\n"
+                    f"Removed {removed} missing records from the database."
+                )
+            else:
+                dialog.set_message("Validation Complete")
+                dialog.set_detail(
+                    f"All {total} media items exist and are verified on disk."
+                )
+            dialog.show(self.parent_window)
+
+        def worker():
+            try:
+                res = run_validate()
+            except Exception as e:
+                res = (0, 0, [str(e)])
+            GLib.idle_add(on_finished, res)
+
+        threading.Thread(target=worker, daemon=True).start()
+

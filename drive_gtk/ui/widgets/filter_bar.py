@@ -10,12 +10,17 @@ from gi.repository import Gtk
 
 class FilterBar(Gtk.Box):
     def __init__(
-        self, on_filters_changed=None, on_select_toggled=None, on_select_all=None
+        self,
+        on_filters_changed=None,
+        on_select_toggled=None,
+        on_select_all=None,
+        on_validate=None,
     ):
         super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         self.on_filters_changed = on_filters_changed
         self.on_select_toggled = on_select_toggled
         self.on_select_all = on_select_all
+        self.on_validate = on_validate
 
         self.search_query = ""
         self.filter_type = "all"
@@ -52,6 +57,14 @@ class FilterBar(Gtk.Box):
         self.order_btn.set_icon_name("media-playlist-consecutive-symbolic")
         self.order_btn.connect("clicked", self._on_order_toggled)
         self.append(self.order_btn)
+
+        if self.on_validate is not None:
+            self.validate_btn = Gtk.Button(label="Validate")
+            self.validate_btn.set_tooltip_text(
+                "Verify files exist on disk and remove missing entries from DB"
+            )
+            self.validate_btn.connect("clicked", self._on_validate_clicked)
+            self.append(self.validate_btn)
 
         self.select_btn = Gtk.ToggleButton(label="Select")
         self.select_btn.connect("toggled", self._on_select_toggled)
@@ -101,6 +114,10 @@ class FilterBar(Gtk.Box):
     def _on_select_all_clicked(self, btn):
         if self.on_select_all:
             self.on_select_all()
+
+    def _on_validate_clicked(self, btn):
+        if self.on_validate:
+            self.on_validate()
 
     def set_select_mode(self, active):
         """Programmatically enter/exit selection mode (e.g. after a batch op)."""

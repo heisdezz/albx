@@ -5,7 +5,13 @@ from gi.repository import Adw, GLib, Gtk
 from router import get_router
 
 from core.database import assert_writable, get_database_connection, open_readable_db
-from core.media_ops import delete_album, list_albums, merge_albums, rename_album
+from core.media_ops import (
+    delete_album,
+    list_albums,
+    merge_albums,
+    rename_album,
+    validate_album_files,
+)
 from ui.widgets.media_grid import MoveToAlbumDialog
 
 
@@ -139,6 +145,13 @@ class AlbumsView(Gtk.Box):
         self.order_btn.set_icon_name("view-sort-ascending-symbolic")
         self.order_btn.connect("clicked", self.on_order_toggled)
         controls.append(self.order_btn)
+
+        validate_all_btn = Gtk.Button(label="Validate All")
+        validate_all_btn.set_tooltip_text(
+            "Verify all files across all albums exist on disk and remove missing DB records"
+        )
+        validate_all_btn.connect("clicked", self.on_validate_all_clicked)
+        controls.append(validate_all_btn)
 
         create_btn = Gtk.Button(label="New Album")
         create_btn.add_css_class("suggested-action")
@@ -288,6 +301,14 @@ class AlbumsView(Gtk.Box):
         )
         box.append(merge_btn)
 
+        validate_btn = Gtk.Button(label="Validate Files…")
+        validate_btn.set_halign(Gtk.Align.FILL)
+        validate_btn.connect(
+            "clicked",
+            lambda b: self._menu_action(popover, self.on_validate_album, album),
+        )
+        box.append(validate_btn)
+
         delete_btn = Gtk.Button(label="Delete…")
         delete_btn.set_halign(Gtk.Align.FILL)
         delete_btn.add_css_class("destructive-action")
@@ -303,6 +324,61 @@ class AlbumsView(Gtk.Box):
     def _menu_action(self, popover, handler, album):
         popover.popdown()
         handler(album)
+
+    # --- validate ------------------------------------------------------------
+
+    def on_validate_album(self, album):
+        if not self.drive:
+            return
+        album_name = display_name_for(album["name"])
+
+        def run():
+            return validate_album_files(self.drive["path"], album["id"])
+
+        def on_done(result):
+            total, removed, errors = result
+            self.load_data()
+            if errors:
+                self._alert("Validation Finished with Errors", "\n".join(errors))
+            elif removed > 0:
+                self._alert(
+                    "Validation Complete",
+                    f"Validated {total} files in '{album_name}'.\n"
+                    f"Removed {removed} missing records from the database.",
+                )
+            else:
+                self._alert(
+                    "Validation Complete",
+                    f"All {total} files in '{album_name}' exist and are verified.",
+                )
+
+        self._run_album_operation(run, on_done)
+
+    def on_validate_all_clicked(self, btn):
+        if not self.drive:
+            return
+
+        def run():
+            return validate_album_files(self.drive["path"], None)
+
+        def on_done(result):
+            total, removed, errors = result
+            self.load_data()
+            if errors:
+                self._alert("Validation Finished with Errors", "\n".join(errors))
+            elif removed > 0:
+                self._alert(
+                    "Validation Complete",
+                    f"Validated {total} files across all albums.\n"
+                    f"Removed {removed} missing records from the database.",
+                )
+            else:
+                self._alert(
+                    "Validation Complete",
+                    f"All {total} files across all albums exist and are verified.",
+                )
+
+        self._run_album_operation(run, on_done)
 
     # --- rename --------------------------------------------------------------
 

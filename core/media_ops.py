@@ -452,3 +452,84 @@ def delete_album(
     finally:
         if conn:
             conn.close()
+
+
+def validate_album_files(
+    drive_path: str, album_id: int | None = None
+) -> tuple[int, int, list[str]]:
+    """Validate that media files tracked in the database still physically exist on disk.
+
+    If a file no longer exists at its current_relative_path (or original_relative_path),
+    its database entry and associated thumbnail are purged.
+
+    If album_id is specified, only files in that album are validated.
+    If album_id is None, all files across the entire media library are validated.
+
+    Returns (total_checked, removed_count, errors).
+    """
+    db_path = get_db_path(drive_path)
+    conn = get_database_connection(db_path)
+    if not conn:
+        return 0, 0, ["Could not open the media library database."]
+
+    try:
+        cursor = conn.cursor()
+        if album_id is not None:
+            cursor.execute(
+                "SELECT id, current_relative_path, original_relative_path, file_hash "
+                "FROM media_items WHERE album_id = ?",
+                (album_id,),
+            )
+        else:
+            cursor.execute(
+                "SELECT id, current_relative_path, original_relative_path, file_hash "
+                "FROM media_items"
+            )
+        rows = cursor.fetchall()
+        total_checked = len(rows)
+
+        missing_ids: list[int] = []
+        errors: list[str] = []
+
+        for row in rows:
+            cur_rel = row["current_relative_path"]
+            orig_rel = row["original_relative_path"]
+            file_hash = row["file_hash"]
+
+            cur_full = os.path.join(drive_path, cur_rel) if cur_rel else None
+            orig_full = os.path.join(drive_path, orig_rel) if orig_rel else None
+
+            exists = (cur_full and os.path.exists(cur_full)) or (
+                orig_full and os.path.exists(orig_full)
+            )
+
+            if not exists:
+                missing_ids.append(row["id"])
+                if file_hash:
+                    thumb = _thumb_path(drive_path, file_hash)
+                    try:
+                        if os.path.exists(thumb):
+                            os.remove(thumb)
+                    except OSError:
+                        pass
+
+        if missing_ids:
+            chunk_size = 500
+            for i in range(0, len(missing_ids), chunk_size):
+                chunk = missing_ids[i : i + chunk_size]
+                ph = ",".join("?" * len(chunk))
+                cursor.execute(
+                    f"DELETE FROM media_tags WHERE media_id IN ({ph})", chunk
+                )
+                cursor.execute(f"DELETE FROM media_items WHERE id IN ({ph})", chunk)
+            conn.commit()
+
+        return total_checked, len(missing_ids), errors
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        return 0, 0, [str(e)]
+    finally:
+        if conn:
+            conn.close()
+
