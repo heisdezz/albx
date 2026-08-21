@@ -37,6 +37,9 @@ DEFAULT_IGNORES = [
     "node_modules",
     "dist",
     "build",
+    "albums",
+    "System Volume Information",
+    "$RECYCLE.BIN",
 ]
 
 
