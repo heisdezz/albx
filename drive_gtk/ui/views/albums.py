@@ -4,8 +4,10 @@ import threading
 from gi.repository import Adw, GLib, Gtk
 from router import get_router
 
-from core.database import assert_writable, get_database_connection, open_readable_db
+from core.database import assert_writable, open_readable_db
 from core.media_ops import (
+    _validate_album_name,
+    create_album,
     delete_album,
     list_albums,
     merge_albums,
@@ -29,32 +31,76 @@ class AlbumCard(Gtk.Box):
         self.album = album
         self.drive_path = drive_path
         self.on_clicked = on_clicked_callback
+        self.on_menu = on_menu_callback
 
-        self.add_css_class("media-card")
-        self.set_size_request(140, 160)
-        self.build_ui(on_menu_callback)
+        self.add_css_class("card")
+        self.set_size_request(200, 220)
+        self.set_cursor_from_name("pointer")
 
-    def build_ui(self, on_menu_callback):
-        img = Gtk.Image()
-        img.set_pixel_size(96)
-        img.set_size_request(130, 96)
-        img.set_valign(Gtk.Align.CENTER)
-        img.set_halign(Gtk.Align.CENTER)
+        self.build_ui()
+
+    def build_ui(self):
+        overlay = Gtk.Overlay()
+        overlay.set_size_request(180, 140)
+
+        # Base container for picture or placeholder icon
+        self.pic_container = Gtk.Box()
+        self.pic_container.set_size_request(180, 140)
+        self.pic_container.add_css_class("card")
+        self.pic_container.set_halign(Gtk.Align.FILL)
+        self.pic_container.set_valign(Gtk.Align.FILL)
 
         preview = self.album.get("preview_item")
-        if preview and os.path.exists(
-            os.path.join(
-                self.drive_path, "albums", "thumbs", f"{preview['file_hash']}.jpg"
-            )
-        ):
-            thumb_path = os.path.join(
-                self.drive_path, "albums", "thumbs", f"{preview['file_hash']}.jpg"
-            )
-            img.set_from_file(thumb_path)
-        else:
-            img.set_from_icon_name("folder-symbolic")
+        has_preview = False
 
-        self.append(img)
+        if preview:
+            file_hash = preview.get("file_hash")
+            thumb_path = os.path.join(
+                self.drive_path, "albums", "thumbs", f"{file_hash}.jpg"
+            )
+            media_path = os.path.join(
+                self.drive_path, preview.get("current_relative_path", "")
+            )
+
+            load_target = None
+            if os.path.exists(thumb_path):
+                load_target = thumb_path
+            elif os.path.exists(media_path) and preview.get("mime_type", "").startswith(
+                "image/"
+            ):
+                load_target = media_path
+
+            if load_target:
+                picture = Gtk.Picture.new_for_filename(load_target)
+                picture.set_content_fit(Gtk.ContentFit.COVER)
+                self.pic_container.append(picture)
+                has_preview = True
+
+        if not has_preview:
+            placeholder = Gtk.Image.new_from_icon_name("folder-symbolic")
+            placeholder.set_pixel_size(48)
+            placeholder.set_halign(Gtk.Align.CENTER)
+            placeholder.set_valign(Gtk.Align.CENTER)
+            placeholder.set_hexpand(True)
+            placeholder.set_vexpand(True)
+            self.pic_container.append(placeholder)
+
+        overlay.set_child(self.pic_container)
+
+        # Context Menu Button (top-right overlay)
+        if self.album["name"] != "unknown" and self.on_menu:
+            menu_btn = Gtk.Button()
+            menu_btn.set_icon_name("view-more-symbolic")
+            menu_btn.add_css_class("osd")
+            menu_btn.add_css_class("circular")
+            menu_btn.set_halign(Gtk.Align.END)
+            menu_btn.set_valign(Gtk.Align.START)
+            menu_btn.set_margin_top(6)
+            menu_btn.set_margin_end(6)
+            menu_btn.connect("clicked", lambda btn: self.on_menu(btn, self.album))
+            overlay.add_overlay(menu_btn)
+
+        self.append(overlay)
 
         display_name = display_name_for(self.album["name"])
         name_lbl = Gtk.Label()
@@ -63,47 +109,48 @@ class AlbumCard(Gtk.Box):
         name_lbl.set_ellipsize(3)
         self.append(name_lbl)
 
-        count_lbl = Gtk.Label(label=f"{self.album['media_count']} items")
-        count_lbl.add_css_class("dim-label")
-        count_lbl.set_halign(Gtk.Align.CENTER)
-        self.append(count_lbl)
+        count = self.album.get("media_count", 0)
+        items_lbl = Gtk.Label(label=f"{count} {'item' if count == 1 else 'items'}")
+        items_lbl.add_css_class("caption")
+        items_lbl.set_halign(Gtk.Align.CENTER)
+        self.append(items_lbl)
 
-        click_gesture = Gtk.GestureClick()
-        click_gesture.set_button(1)
-        click_gesture.connect(
-            "released", lambda gesture, n, x, y: self.on_clicked(self.album)
-        )
-        self.add_controller(click_gesture)
+        # Click gesture opens the album
+        click = Gtk.GestureClick.new()
+        click.connect("pressed", self.on_card_pressed)
+        self.add_controller(click)
 
-        if on_menu_callback is not None:
-            menu_gesture = Gtk.GestureClick()
-            menu_gesture.set_button(3)
-            menu_gesture.connect(
-                "released", lambda gesture, n, x, y: on_menu_callback(self.album, self)
-            )
-            self.add_controller(menu_gesture)
+    def on_card_pressed(self, gesture, n_press, x, y):
+        # Don't trigger album navigation if the click landed on the context menu button
+        widget = self.pick(x, y, Gtk.PickFlags.DEFAULT)
+        if widget and (
+            isinstance(widget, Gtk.Button)
+            or widget.get_ancestor(Gtk.Button) is not None
+        ):
+            return
+        if self.on_clicked:
+            self.on_clicked(self.album)
 
 
 class AlbumsView(Gtk.Box):
-    def __init__(self, parent_window, drive):
+    def __init__(self, parent_window, drive=None):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=16)
         self.parent_window = parent_window
         self.drive = drive
+
+        self.sort_by = "name"
+        self.sort_order = "asc"
 
         self.set_margin_start(24)
         self.set_margin_end(24)
         self.set_margin_top(24)
         self.set_margin_bottom(24)
 
-        self.sort_by = "name"
-        self.sort_order = "asc"
-
         self.build_ui()
-        if self.drive:
-            self.load_data()
+        self.load_data()
 
     def build_ui(self):
-        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
 
         title_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         title = Gtk.Label()
@@ -115,48 +162,49 @@ class AlbumsView(Gtk.Box):
         subtitle = Gtk.Label(
             label="Organized subfolders traveling with the physical media drive."
         )
-        subtitle.set_halign(Gtk.Align.START)
         subtitle.add_css_class("dim-label")
+        subtitle.set_halign(Gtk.Align.START)
 
         title_box.append(title)
         title_box.append(subtitle)
-        title_box.set_hexpand(True)
         header.append(title_box)
 
+        # Spacer
+        spacer = Gtk.Box()
+        spacer.set_hexpand(True)
+        header.append(spacer)
+
+        # Controls (Search, Sort, Validate All, New Album)
         controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        controls.set_halign(Gtk.Align.END)
-        controls.set_valign(Gtk.Align.CENTER)
 
         self.search_entry = Gtk.SearchEntry()
-        self.search_entry.set_placeholder_text("Search albums...")
-        self.search_entry.set_width_chars(20)
+        self.search_entry.set_placeholder_text("Search albums…")
         self.search_entry.connect("search-changed", self.on_search_changed)
         controls.append(self.search_entry)
 
-        self.sort_combo = Gtk.ComboBoxText()
-        self.sort_combo.append("name", "Sort: Name")
-        self.sort_combo.append("items", "Sort: Items")
-        self.sort_combo.append("date", "Sort: Date Added")
-        self.sort_combo.set_active_id("name")
-        self.sort_combo.connect("changed", self.on_sort_changed)
+        self.sort_combo = Gtk.DropDown.new_from_strings(
+            ["Name", "Item Count", "Creation Date"]
+        )
+        self.sort_combo.connect("notify::selected", self.on_sort_changed)
         controls.append(self.sort_combo)
 
         self.order_btn = Gtk.Button()
         self.order_btn.set_icon_name("view-sort-ascending-symbolic")
+        self.order_btn.set_tooltip_text("Toggle Sort Order")
         self.order_btn.connect("clicked", self.on_order_toggled)
         controls.append(self.order_btn)
 
         validate_all_btn = Gtk.Button(label="Validate All")
-        validate_all_btn.set_tooltip_text(
-            "Verify all files across all albums exist on disk and remove missing DB records"
-        )
+        validate_all_btn.set_icon_name("emblem-ok-symbolic")
+        validate_all_btn.set_tooltip_text("Check all albums for missing files")
         validate_all_btn.connect("clicked", self.on_validate_all_clicked)
         controls.append(validate_all_btn)
 
-        create_btn = Gtk.Button(label="New Album")
-        create_btn.add_css_class("suggested-action")
-        create_btn.connect("clicked", self.on_new_album_clicked)
-        controls.append(create_btn)
+        new_album_btn = Gtk.Button(label="New Album")
+        new_album_btn.set_icon_name("list-add-symbolic")
+        new_album_btn.add_css_class("suggested-action")
+        new_album_btn.connect("clicked", self.on_new_album_clicked)
+        controls.append(new_album_btn)
 
         header.append(controls)
 
@@ -184,8 +232,10 @@ class AlbumsView(Gtk.Box):
     def on_search_changed(self, entry):
         self.load_data()
 
-    def on_sort_changed(self, combo):
-        self.sort_by = combo.get_active_id()
+    def on_sort_changed(self, combo, param):
+        idx = combo.get_selected()
+        mapping = {0: "name", 1: "items", 2: "date"}
+        self.sort_by = mapping.get(idx, "name")
         self.load_data()
 
     def on_order_toggled(self, btn):
@@ -259,33 +309,44 @@ class AlbumsView(Gtk.Box):
             elif self.sort_by == "date":
                 albums.sort(key=lambda a: a["created_at"] or "", reverse=desc)
             else:
-                albums.sort(key=lambda a: a["display_name"].lower(), reverse=desc)
+                albums.sort(
+                    key=lambda a: (
+                        a["name"] != "unknown",
+                        a["display_name"].lower(),
+                    ),
+                    reverse=desc,
+                )
+
+            conn.close()
 
             for album in albums:
-                on_menu = self.on_album_menu if album["name"] != "unknown" else None
                 card = AlbumCard(
-                    album, self.drive["path"], self.on_card_clicked, on_menu
+                    album,
+                    self.drive["path"],
+                    self.on_album_clicked,
+                    self.on_album_menu_clicked,
                 )
                 self.flow_box.append(card)
 
-            conn.close()
         except Exception as e:
-            print(f"[AlbumsView] Load failed: {e}")
+            print(f"[AlbumsView] Error loading albums: {e}")
 
-    def on_card_clicked(self, album):
+    # --- album navigation ----------------------------------------------------
+
+    def on_album_clicked(self, album):
         get_router().navigate("/media", {"drive": self.drive, "album_id": album["id"]})
 
     # --- context menu --------------------------------------------------------
 
-    def on_album_menu(self, album, anchor):
+    def on_album_menu_clicked(self, btn, album):
         popover = Gtk.Popover()
-        popover.set_parent(anchor)
+        popover.set_parent(btn)
 
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        box.set_margin_top(8)
-        box.set_margin_bottom(8)
-        box.set_margin_start(8)
-        box.set_margin_end(8)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        box.set_margin_start(4)
+        box.set_margin_end(4)
+        box.set_margin_top(4)
+        box.set_margin_bottom(4)
 
         rename_btn = Gtk.Button(label="Rename…")
         rename_btn.set_halign(Gtk.Align.FILL)
@@ -420,14 +481,9 @@ class AlbumsView(Gtk.Box):
 
         def save_rename(x):
             new_name = name_entry.get_text().strip()
-            if not new_name or "/" in new_name or "\\" in new_name or ".." in new_name:
-                self._alert(
-                    "Invalid Album Name",
-                    "Name cannot contain slashes or relative path segments.",
-                )
-                return
-            if new_name.lower() == "unknown":
-                self._alert("Invalid Album Name", "The name 'unknown' is reserved.")
+            ok, err = _validate_album_name(new_name)
+            if not ok:
+                self._alert("Invalid Album Name", err)
                 return
             success, err = rename_album(self.drive["path"], album["id"], new_name)
             if success:
@@ -449,32 +505,51 @@ class AlbumsView(Gtk.Box):
     def on_merge_album(self, album):
         if not self.drive:
             return
-        targets = [
-            {"id": a["id"], "name": a["name"]}
-            for a in list_albums(self.drive["path"])
-            if a["id"] != album["id"]
-        ]
-        if not targets:
-            self._alert("Merge Unavailable", "No other albums exist to merge into.")
+        all_albums = list_albums(self.drive["path"])
+        # Filter out the source album
+        candidates = [a for a in all_albums if a["id"] != album["id"]]
+        if not candidates:
+            self._alert("No Target Albums", "There are no other albums to merge into.")
             return
 
-        def on_album_selected(target_album):
-            if not target_album:
+        def on_target_selected(target):
+            if not target:
                 return
-            target_id = target_album["id"]
-            self._run_album_operation(
-                lambda: merge_albums(self.drive["path"], album["id"], target_id),
-                self._finish_album_operation,
+            target_name = display_name_for(target["name"])
+            source_name = display_name_for(album["name"])
+
+            confirm = Gtk.AlertDialog()
+            confirm.set_message(f"Merge '{source_name}' into '{target_name}'?")
+            confirm.set_detail(
+                f"All media items will be moved into '{target_name}'. "
+                f"The album '{source_name}' will be removed."
+            )
+            confirm.set_buttons(["Cancel", "Merge Albums"])
+            confirm.set_default_button(0)
+            confirm.set_cancel_button(0)
+            confirm.choose(
+                self.parent_window,
+                None,
+                lambda d, res: self._on_merge_confirmed(
+                    d, res, album["id"], target["id"]
+                ),
             )
 
-        dialog = MoveToAlbumDialog(
+        dlg = MoveToAlbumDialog(
             parent_window=self.parent_window,
-            albums=targets,
-            callback=on_album_selected,
-            title=f"Merge '{display_name_for(album['name'])}'",
-            button_label="Merge Albums",
+            albums=candidates,
+            callback=on_target_selected,
+            title=f"Merge '{display_name_for(album['name'])}' into…",
+            button_label="Select Target Album",
         )
-        dialog.show()
+        dlg.present()
+
+    def _on_merge_confirmed(self, dialog, result, src_id, tgt_id):
+        if dialog.choose_finish(result) == 1:
+            self._run_album_operation(
+                lambda: merge_albums(self.drive["path"], src_id, tgt_id),
+                self._finish_album_operation,
+            )
 
     # --- delete --------------------------------------------------------------
 
@@ -586,48 +661,28 @@ class AlbumsView(Gtk.Box):
             name = name_entry.get_text().strip()
             desc = desc_entry.get_text().strip()
 
-            if not name or "/" in name or "\\" in name or ".." in name:
+            ok, err = _validate_album_name(name)
+            if not ok:
                 err_dialog = Gtk.AlertDialog()
                 err_dialog.set_message("Invalid Album Name")
-                err_dialog.set_detail(
-                    "Name cannot contain slashes or relative path segments."
-                )
+                err_dialog.set_detail(err)
                 err_dialog.show(dialog)
                 return
 
-            db_path = os.path.join(self.drive["path"], "albums", ".media_library.db")
-            conn = None
             try:
                 assert_writable(self.drive["path"])
-                conn = get_database_connection(db_path)
-                cursor = conn.cursor()
-
-                cursor.execute("SELECT id FROM albums WHERE name = ?", (name,))
-                if cursor.fetchone():
+                success, err = create_album(self.drive["path"], name, desc)
+                if not success:
                     err_dialog = Gtk.AlertDialog()
-                    err_dialog.set_message("Album Already Exists")
-                    err_dialog.set_detail(
-                        f"An album folder named '{name}' is already defined."
-                    )
+                    err_dialog.set_message("Create Album Failed")
+                    err_dialog.set_detail(err)
                     err_dialog.show(dialog)
                     return
-
-                cursor.execute(
-                    "INSERT INTO albums (name, relative_path, description) VALUES (?, ?, ?)",
-                    (name, f"albums/{name}", desc or None),
-                )
-                conn.commit()
-
-                album_path = os.path.join(self.drive["path"], "albums", name)
-                os.makedirs(album_path, exist_ok=True)
 
                 dialog.close()
                 self.load_data()
             except Exception as err:
                 print(f"[AlbumsView] Save album failed: {err}")
-            finally:
-                if conn:
-                    conn.close()
 
         create_btn.connect("clicked", save_album)
 

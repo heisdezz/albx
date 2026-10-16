@@ -2,37 +2,17 @@
 
 import os
 import shutil
+import sqlite3
 
-from core.database import get_database_connection, get_db_path, open_readable_db
+from core.database import get_database_connection, get_db_path
 from core.file_ops import move_file
 
 
-def _thumb_path(drive_path: str, file_hash: str) -> str:
-    return os.path.join(drive_path, "albums", "thumbs", f"{file_hash}.jpg")
-
-
-def list_albums(drive_path: str) -> list[dict]:
-    """Return albums as [{id, name, relative_path}], 'unknown' shown as Unsorted."""
-    db_path = get_db_path(drive_path)
-    if not os.path.exists(db_path):
-        return []
-    conn = open_readable_db(db_path)
-    try:
-        rows = conn.execute(
-            "SELECT id, name, relative_path FROM albums ORDER BY name"
-        ).fetchall()
-        return [
-            {"id": r["id"], "name": r["name"], "relative_path": r["relative_path"]}
-            for r in rows
-        ]
-    finally:
-        conn.close()
-
-
 def delete_media_items(drive_path: str, ids: list[int]) -> tuple[int, list[str]]:
-    """Physically delete the files (and thumbnails) then their DB rows.
+    """Delete media files from disk and remove their records from the DB.
 
-    Returns (deleted_count, errors).
+    Uses a transaction: if the DB update fails, rolled back. Returns (deleted_count,
+    errors).
     """
     if not ids:
         return 0, []
@@ -42,44 +22,44 @@ def delete_media_items(drive_path: str, ids: list[int]) -> tuple[int, list[str]]
     if not conn:
         return 0, ["Could not open the media library database."]
 
-    errors: list[str] = []
-    select_placeholders = ",".join("?" * len(ids))
+    errors = []
+    deleted = 0
+
     try:
+        placeholders = ",".join("?" * len(ids))
         rows = conn.execute(
             f"SELECT id, current_relative_path, file_hash FROM media_items "
-            f"WHERE id IN ({select_placeholders})",
+            f"WHERE id IN ({placeholders})",
             ids,
         ).fetchall()
 
-        deleted_ids: list[int] = []
         for row in rows:
+            # Delete the media file itself
             full_path = os.path.join(drive_path, row["current_relative_path"])
-            try:
-                if os.path.exists(full_path):
-                    os.remove(full_path)
-            except OSError as e:
-                errors.append(f"{os.path.basename(full_path)}: {e}")
-                continue  # keep the DB row if the file couldn't be removed
-
-            if row["file_hash"]:
-                thumb = _thumb_path(drive_path, row["file_hash"])
+            if os.path.exists(full_path):
                 try:
-                    if os.path.exists(thumb):
-                        os.remove(thumb)
-                except OSError:
-                    pass  # a stale thumbnail is harmless
+                    os.remove(full_path)
+                except OSError as e:
+                    errors.append(f"{row['current_relative_path']}: {e}")
 
-            deleted_ids.append(row["id"])
-
-        # Only remove DB rows for files that were actually deleted from disk.
-        if deleted_ids:
-            ph = ",".join("?" * len(deleted_ids))
-            conn.execute(
-                f"DELETE FROM media_tags WHERE media_id IN ({ph})", deleted_ids
+            # Delete the thumbnail if it exists
+            thumb_path = os.path.join(
+                drive_path, "albums", "thumbs", f"{row['file_hash']}.jpg"
             )
-            conn.execute(f"DELETE FROM media_items WHERE id IN ({ph})", deleted_ids)
-            conn.commit()
-        return len(deleted_ids), errors
+            if os.path.exists(thumb_path):
+                try:
+                    os.remove(thumb_path)
+                except OSError:
+                    pass
+
+        # Delete database records
+        conn.execute(
+            f"DELETE FROM media_items WHERE id IN ({placeholders})",
+            ids,
+        )
+        conn.commit()
+        deleted = len(rows)
+        return deleted, errors
     except Exception as e:
         conn.rollback()
         return 0, [str(e)]
@@ -87,23 +67,39 @@ def delete_media_items(drive_path: str, ids: list[int]) -> tuple[int, list[str]]
         conn.close()
 
 
-def _unique_relative_path(drive_path: str, rel_path: str) -> str:
-    """Append ' (n)' before the extension until the target path is free on disk."""
-    if not os.path.exists(os.path.join(drive_path, rel_path)):
-        return rel_path
-    base, ext = os.path.splitext(rel_path)
-    n = 1
-    while True:
-        candidate = f"{base} ({n}){ext}"
-        if not os.path.exists(os.path.join(drive_path, candidate)):
-            return candidate
-        n += 1
+def list_albums(drive_path: str) -> list[dict]:
+    """Return all albums for the drive as a list of dicts with id, name, relative_path."""
+    db_path = get_db_path(drive_path)
+    conn = get_database_connection(db_path)
+    if not conn:
+        return []
+    try:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT id, name, relative_path FROM albums ORDER BY name"
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def _unique_relative_path(drive_path: str, target_rel: str) -> str:
+    """If target_rel already exists on disk, append _1, _2, etc. before the extension."""
+    full = os.path.join(drive_path, target_rel)
+    if not os.path.exists(full):
+        return target_rel
+
+    base, ext = os.path.splitext(target_rel)
+    counter = 1
+    while os.path.exists(os.path.join(drive_path, f"{base}_{counter}{ext}")):
+        counter += 1
+    return f"{base}_{counter}{ext}"
 
 
 def move_media_items(
     drive_path: str, ids: list[int], target_album_id: int
 ) -> tuple[int, list[str]]:
-    """Move files into the target album's folder and update the DB.
+    """Move media files to a new album directory on disk and update the DB.
 
     Returns (moved_count, errors).
     """
@@ -115,8 +111,9 @@ def move_media_items(
     if not conn:
         return 0, ["Could not open the media library database."]
 
-    errors: list[str] = []
+    errors = []
     moved = 0
+
     try:
         album = conn.execute(
             "SELECT relative_path FROM albums WHERE id = ?", (target_album_id,)
@@ -167,21 +164,28 @@ def move_media_items(
 
 def _validate_album_name(name: str) -> tuple[bool, str]:
     """Validate an album folder name. Returns (ok, error_message)."""
-    if not name:
+    if not name or not name.strip():
         return False, "Album name cannot be empty."
 
-    # Check for invalid characters in folder name
-    invalid_chars = ["/", "\\", ":", "*", "?", '"', "<", ">", "|"]
-    if any(c in name for c in invalid_chars):
+    cleaned = name.strip().replace("\\", "/")
+    if cleaned.startswith("/") or cleaned.endswith("/"):
+        return False, "Album name cannot start or end with a slash."
+
+    segments = cleaned.split("/")
+    if any(seg in ("", ".", "..") for seg in segments):
+        return False, "Album name cannot contain empty or relative path segments."
+
+    invalid_chars = [":", "*", "?", '"', "<", ">", "|"]
+    if any(c in cleaned for c in invalid_chars):
         return False, "Album name contains invalid characters."
 
-    if name.lower() == "unknown":
+    if cleaned.lower() == "unknown":
         return False, "The name 'unknown' is reserved."
 
     return True, ""
 
 
-def create_album(drive_path: str, name: str) -> tuple[bool, str]:
+def create_album(drive_path: str, name: str, description: str = "") -> tuple[bool, str]:
     """Create a new album folder on disk and insert a record into the database.
 
     Returns (success, error_message).
@@ -197,21 +201,26 @@ def create_album(drive_path: str, name: str) -> tuple[bool, str]:
 
     try:
         cursor = conn.cursor()
+        cleaned_name = name.strip().replace("\\", "/")
+        album_rel_path = os.path.join("albums", cleaned_name).replace("\\", "/")
+
         # Check if album already exists in DB
-        cursor.execute("SELECT id FROM albums WHERE name = ?", (name,))
+        cursor.execute(
+            "SELECT id FROM albums WHERE name = ? OR relative_path = ?",
+            (cleaned_name, album_rel_path),
+        )
         if cursor.fetchone():
-            return False, f"An album named '{name}' already exists."
+            return False, f"An album named '{cleaned_name}' already exists."
 
         # Create directory on disk
-        album_rel_path = os.path.join("albums", name)
         album_full_path = os.path.join(drive_path, album_rel_path)
-
         os.makedirs(album_full_path, exist_ok=True)
 
         # Insert into database
+        desc = description if description else f"Custom album: {cleaned_name}"
         cursor.execute(
             "INSERT INTO albums (name, relative_path, description) VALUES (?, ?, ?)",
-            (name, album_rel_path, f"Custom album: {name}"),
+            (cleaned_name, album_rel_path, desc),
         )
         conn.commit()
         return True, ""
@@ -247,14 +256,19 @@ def rename_album(drive_path: str, album_id: int, new_name: str) -> tuple[bool, s
             return False, "Album not found."
         old_name, old_rel = row["name"], row["relative_path"]
 
-        if old_name == new_name:
+        cleaned_new = new_name.replace("\\", "/")
+        new_rel = os.path.join("albums", cleaned_new).replace("\\", "/")
+
+        if old_name == cleaned_new:
             return True, ""
 
-        cursor.execute("SELECT id FROM albums WHERE name = ?", (new_name,))
+        cursor.execute(
+            "SELECT id FROM albums WHERE name = ? OR relative_path = ?",
+            (cleaned_new, new_rel),
+        )
         if cursor.fetchone():
-            return False, f"An album named '{new_name}' already exists."
+            return False, f"An album named '{cleaned_new}' already exists."
 
-        new_rel = os.path.join("albums", new_name)
         old_full = os.path.join(drive_path, old_rel)
         new_full = os.path.join(drive_path, new_rel)
 
@@ -262,27 +276,29 @@ def rename_album(drive_path: str, album_id: int, new_name: str) -> tuple[bool, s
             if os.path.exists(new_full):
                 return (
                     False,
-                    f"A folder named '{new_name}' already exists on the drive.",
+                    f"A folder named '{cleaned_new}' already exists on the drive.",
                 )
+            os.makedirs(os.path.dirname(new_full), exist_ok=True)
             os.rename(old_full, new_full)
 
         # Rewrite media paths that live under the old album folder.
-        old_prefix = old_rel + os.sep
+        old_prefix = old_rel.rstrip("/\\") + "/"
         for mrow in cursor.execute(
             "SELECT id, current_relative_path FROM media_items WHERE album_id = ?",
             (album_id,),
         ).fetchall():
-            rel = mrow["current_relative_path"]
+            rel = mrow["current_relative_path"].replace("\\", "/")
             if rel.startswith(old_prefix):
                 sub = rel[len(old_prefix) :]
+                new_item_rel = f"{new_rel}/{sub}".replace("\\", "/")
                 cursor.execute(
                     "UPDATE media_items SET current_relative_path = ? WHERE id = ?",
-                    (os.path.join(new_rel, sub), mrow["id"]),
+                    (new_item_rel, mrow["id"]),
                 )
 
         cursor.execute(
             "UPDATE albums SET name = ?, relative_path = ? WHERE id = ?",
-            (new_name, new_rel, album_id),
+            (cleaned_new, new_rel, album_id),
         )
         conn.commit()
         return True, ""
@@ -311,43 +327,55 @@ def merge_albums(
 
     try:
         cursor = conn.cursor()
-        cursor.execute(
+
+        src = cursor.execute(
             "SELECT name, relative_path FROM albums WHERE id = ?", (source_album_id,)
-        )
-        src = cursor.fetchone()
-        if not src:
-            return False, "Source album not found.", []
-        if src["name"] == "unknown":
-            return (
-                False,
-                "The default Unsorted Media album cannot be merged into another album.",
-                [],
+        ).fetchone()
+        tgt = cursor.execute(
+            "SELECT name, relative_path FROM albums WHERE id = ?", (target_album_id,)
+        ).fetchone()
+
+        if not src or not tgt:
+            return False, "One of the albums was not found.", []
+
+        src_name, src_rel = src["name"], src["relative_path"]
+        tgt_rel = tgt["relative_path"]
+
+        if src_name == "unknown":
+            return False, "The default 'Unsorted Media' album cannot be merged.", []
+
+        # Find all media in source album
+        media_rows = cursor.execute(
+            "SELECT id, current_relative_path FROM media_items WHERE album_id = ?",
+            (source_album_id,),
+        ).fetchall()
+
+        file_errors = []
+        for m in media_rows:
+            filename = os.path.basename(m["current_relative_path"])
+            target_rel = _unique_relative_path(
+                drive_path, os.path.join(tgt_rel, filename)
+            )
+            src_file = os.path.join(drive_path, m["current_relative_path"])
+            dst_file = os.path.join(drive_path, target_rel)
+
+            try:
+                move_file(src_file, dst_file)
+            except (OSError, FileNotFoundError) as e:
+                file_errors.append(f"{filename}: {e}")
+                continue
+
+            cursor.execute(
+                "UPDATE media_items SET current_relative_path = ?, album_id = ? "
+                "WHERE id = ?",
+                (target_rel, target_album_id, m["id"]),
             )
 
-        cursor.execute("SELECT id FROM albums WHERE id = ?", (target_album_id,))
-        if not cursor.fetchone():
-            return False, "Target album not found.", []
-
-        media_ids = [
-            r[0]
-            for r in cursor.execute(
-                "SELECT id FROM media_items WHERE album_id = ?", (source_album_id,)
-            ).fetchall()
-        ]
-        src_rel = src["relative_path"]
-        conn.close()
-        conn = None
-
-        # move_media_items manages its own connection.
-        errors: list[str] = []
-        if media_ids:
-            _, errors = move_media_items(drive_path, media_ids, target_album_id)
-
-        # Remove the source album row and its (now empty) folder.
-        conn = get_database_connection(db_path)
-        conn.execute("DELETE FROM albums WHERE id = ?", (source_album_id,))
+        # Remove source album record
+        cursor.execute("DELETE FROM albums WHERE id = ?", (source_album_id,))
         conn.commit()
 
+        # Remove empty source album folder from disk if empty
         src_full = os.path.join(drive_path, src_rel)
         if os.path.exists(src_full):
             try:
@@ -356,78 +384,85 @@ def merge_albums(
                 # Folder still holds stray (uncatalogued) files: leave it be.
                 pass
 
-        return True, "", errors
+        return True, "", file_errors
     except Exception as e:
-        if conn:
-            conn.rollback()
+        conn.rollback()
         return False, str(e), []
     finally:
-        if conn:
-            conn.close()
+        conn.close()
 
 
 def delete_album(
-    drive_path: str, album_id: int, delete_media: bool = False
-) -> tuple[bool, str, list[str]]:
+    drive_path: str, album_id: int, delete_media: bool
+) -> tuple[bool, str]:
     """Delete an album.
 
-    If delete_media is True, all media files inside are permanently deleted from disk.
-    If delete_media is False, they are moved to the 'unknown' (Unsorted Media) album.
-
-    Returns (success, error_message, file_errors).
+    If delete_media=True, all media items and files inside the album are deleted.
+    If delete_media=False, media items are moved to the 'unknown' album and kept on disk.
+    The default 'unknown' album cannot be deleted.
+    Returns (success, error_message).
     """
     db_path = get_db_path(drive_path)
     conn = get_database_connection(db_path)
     if not conn:
-        return False, "Could not open the media library database.", []
+        return False, "Could not open the media library database."
 
     try:
         cursor = conn.cursor()
-        # Check if the album exists and is not 'unknown'
-        cursor.execute(
+        row = cursor.execute(
             "SELECT name, relative_path FROM albums WHERE id = ?", (album_id,)
-        )
-        row = cursor.fetchone()
+        ).fetchone()
         if not row:
-            return False, "Album not found.", []
+            return False, "Album not found."
 
-        album_name, rel_path = row["name"], row["relative_path"]
-        if album_name == "unknown":
-            return False, "The default Unsorted Media album cannot be deleted.", []
+        name, rel_path = row["name"], row["relative_path"]
+        if name == "unknown":
+            return False, "The default 'Unsorted Media' album cannot be deleted."
 
-        # Get unknown album ID
-        cursor.execute("SELECT id FROM albums WHERE name = 'unknown'")
-        unknown_row = cursor.fetchone()
-        if not unknown_row:
-            return False, "Default 'unknown' album not found in database.", []
-        unknown_album_id = unknown_row[0]
+        media_rows = cursor.execute(
+            "SELECT id, current_relative_path, file_hash FROM media_items WHERE album_id = ?",
+            (album_id,),
+        ).fetchall()
+        media_ids = [m["id"] for m in media_rows]
 
-        # Query media items in this album
-        cursor.execute("SELECT id FROM media_items WHERE album_id = ?", (album_id,))
-        media_ids = [r[0] for r in cursor.fetchall()]
+        if delete_media:
+            # Delete media files and thumbnails from disk
+            for m in media_rows:
+                full_path = os.path.join(drive_path, m["current_relative_path"])
+                if os.path.exists(full_path):
+                    try:
+                        os.remove(full_path)
+                    except OSError:
+                        pass
+                thumb_path = os.path.join(
+                    drive_path, "albums", "thumbs", f"{m['file_hash']}.jpg"
+                )
+                if os.path.exists(thumb_path):
+                    try:
+                        os.remove(thumb_path)
+                    except OSError:
+                        pass
 
-        errors: list[str] = []
-        if media_ids:
-            if delete_media:
-                # Permanently delete files from disk + DB.
-                # Must close current conn first as delete_media_items manages its own connection.
-                conn.close()
-                conn = None
-                deleted_count, errors = delete_media_items(drive_path, media_ids)
-            else:
-                # Move files to unknown album.
-                # Must close current conn first as move_media_items manages its own connection.
-                conn.close()
-                conn = None
-                moved_count, errors = move_media_items(
-                    drive_path, media_ids, unknown_album_id
+            if media_ids:
+                placeholders = ",".join("?" * len(media_ids))
+                cursor.execute(
+                    f"DELETE FROM media_items WHERE id IN ({placeholders})",
+                    media_ids,
+                )
+        else:
+            # Reassign media items to 'unknown' album, keep files where they are
+            unknown_row = cursor.execute(
+                "SELECT id FROM albums WHERE name = 'unknown'"
+            ).fetchone()
+            unknown_id = unknown_row["id"] if unknown_row else None
+            if unknown_id and media_ids:
+                placeholders = ",".join("?" * len(media_ids))
+                cursor.execute(
+                    f"UPDATE media_items SET album_id = ? WHERE id IN ({placeholders})",
+                    [unknown_id] + media_ids,
                 )
 
-        # Re-open connection to delete the album row
-        if not conn:
-            conn = get_database_connection(db_path)
-            cursor = conn.cursor()
-
+        # Delete album record
         cursor.execute("DELETE FROM albums WHERE id = ?", (album_id,))
         conn.commit()
 
@@ -444,28 +479,21 @@ def delete_album(
             except OSError as e:
                 print(f"[delete_album] Failed to remove folder: {e}")
 
-        return True, "", errors
+        return True, ""
     except Exception as e:
-        if conn:
-            conn.rollback()
-        return False, str(e), []
+        conn.rollback()
+        return False, str(e)
     finally:
-        if conn:
-            conn.close()
+        conn.close()
 
 
 def validate_album_files(
     drive_path: str, album_id: int | None = None
 ) -> tuple[int, int, list[str]]:
-    """Validate that media files tracked in the database still physically exist on disk.
+    """Verify that all media_items in an album (or all albums if album_id is None)
 
-    If a file no longer exists at its current_relative_path (or original_relative_path),
-    its database entry and associated thumbnail are purged.
-
-    If album_id is specified, only files in that album are validated.
-    If album_id is None, all files across the entire media library are validated.
-
-    Returns (total_checked, removed_count, errors).
+    actually exist on disk. Missing files have their DB records removed.
+    Returns (total_checked, missing_removed, errors).
     """
     db_path = get_db_path(drive_path)
     conn = get_database_connection(db_path)
@@ -475,61 +503,35 @@ def validate_album_files(
     try:
         cursor = conn.cursor()
         if album_id is not None:
-            cursor.execute(
-                "SELECT id, current_relative_path, original_relative_path, file_hash "
-                "FROM media_items WHERE album_id = ?",
+            rows = cursor.execute(
+                "SELECT id, current_relative_path FROM media_items WHERE album_id = ?",
                 (album_id,),
-            )
+            ).fetchall()
         else:
-            cursor.execute(
-                "SELECT id, current_relative_path, original_relative_path, file_hash "
-                "FROM media_items"
-            )
-        rows = cursor.fetchall()
-        total_checked = len(rows)
+            rows = cursor.execute(
+                "SELECT id, current_relative_path FROM media_items"
+            ).fetchall()
 
-        missing_ids: list[int] = []
-        errors: list[str] = []
+        total_checked = len(rows)
+        missing_ids = []
+        errors = []
 
         for row in rows:
-            cur_rel = row["current_relative_path"]
-            orig_rel = row["original_relative_path"]
-            file_hash = row["file_hash"]
-
-            cur_full = os.path.join(drive_path, cur_rel) if cur_rel else None
-            orig_full = os.path.join(drive_path, orig_rel) if orig_rel else None
-
-            exists = (cur_full and os.path.exists(cur_full)) or (
-                orig_full and os.path.exists(orig_full)
-            )
-
-            if not exists:
+            full_path = os.path.join(drive_path, row["current_relative_path"])
+            if not os.path.exists(full_path):
                 missing_ids.append(row["id"])
-                if file_hash:
-                    thumb = _thumb_path(drive_path, file_hash)
-                    try:
-                        if os.path.exists(thumb):
-                            os.remove(thumb)
-                    except OSError:
-                        pass
 
         if missing_ids:
-            chunk_size = 500
-            for i in range(0, len(missing_ids), chunk_size):
-                chunk = missing_ids[i : i + chunk_size]
-                ph = ",".join("?" * len(chunk))
-                cursor.execute(
-                    f"DELETE FROM media_tags WHERE media_id IN ({ph})", chunk
-                )
-                cursor.execute(f"DELETE FROM media_items WHERE id IN ({ph})", chunk)
+            placeholders = ",".join("?" * len(missing_ids))
+            cursor.execute(
+                f"DELETE FROM media_items WHERE id IN ({placeholders})",
+                missing_ids,
+            )
             conn.commit()
 
         return total_checked, len(missing_ids), errors
     except Exception as e:
-        if conn:
-            conn.rollback()
+        conn.rollback()
         return 0, 0, [str(e)]
     finally:
-        if conn:
-            conn.close()
-
+        conn.close()

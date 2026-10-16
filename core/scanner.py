@@ -53,19 +53,22 @@ def calculate_sha256(file_path: str, chunk_size: int = 65536) -> str:
 
 
 def is_ignored(rel_path: str, ignore_list: List[str]) -> bool:
-    normalized = rel_path.replace("\\", "/").lower()
+    normalized = rel_path.replace("\\", "/").lower().strip("/")
     segments = normalized.split("/")
 
     for pattern in ignore_list:
-        p = pattern.lower().strip().replace("\\", "/")
+        p = pattern.lower().strip().replace("\\", "/").strip("/")
         if not p:
             continue
-        if p in segments or any(p in seg for seg in segments):
-            return True
-        # Folder paths picked from the file dialog (e.g. "photos/raw"):
-        # ignore anything under that relative path.
-        if p in normalized:
-            return True
+        if "/" not in p:
+            if p in segments:
+                return True
+        else:
+            p_segments = p.split("/")
+            p_len = len(p_segments)
+            for i in range(len(segments) - p_len + 1):
+                if segments[i : i + p_len] == p_segments:
+                    return True
     return False
 
 
@@ -82,12 +85,77 @@ def walk_directory(
     albums_dir = os.path.join(drive_path, "albums")
     unknown_dir = os.path.join(albums_dir, "unknown")
     os.makedirs(unknown_dir, exist_ok=True)
+    os.makedirs(os.path.join(albums_dir, "thumbs"), exist_ok=True)
 
     conn = get_database_connection(db_path)
     cursor = conn.cursor()
 
     cursor.execute("SELECT id FROM albums WHERE name = 'unknown'")
-    unknown_album_id = cursor.fetchone()[0]
+    row = cursor.fetchone()
+    if row:
+        unknown_album_id = row[0]
+    else:
+        cursor.execute(
+            "INSERT INTO albums (name, relative_path, description) VALUES ('unknown', 'albums/unknown', 'Default album for unsorted media')"
+        )
+        conn.commit()
+        unknown_album_id = cursor.lastrowid
+
+    album_cache: Dict[str, tuple[int, str]] = {
+        "": (unknown_album_id, unknown_dir),
+        ".": (unknown_album_id, unknown_dir),
+        "unknown": (unknown_album_id, unknown_dir),
+    }
+
+    cursor.execute("SELECT id, name, relative_path FROM albums")
+    for r in cursor.fetchall():
+        alb_id, alb_name, alb_rel = r[0], r[1], r[2]
+        full_dir = os.path.join(drive_path, alb_rel)
+        album_cache[alb_name] = (alb_id, full_dir)
+        album_cache[alb_rel] = (alb_id, full_dir)
+        if alb_rel.startswith("albums/"):
+            sub = alb_rel[len("albums/") :].strip("/")
+            if sub:
+                album_cache[sub] = (alb_id, full_dir)
+
+    def get_or_create_album(subfolder_path: str) -> tuple[int, str]:
+        clean_sub = subfolder_path.replace("\\", "/").strip("/")
+        if not clean_sub or clean_sub.lower() in (".", "unknown"):
+            return unknown_album_id, unknown_dir
+
+        if clean_sub.startswith("albums/"):
+            clean_sub = clean_sub[len("albums/") :].strip("/")
+            if not clean_sub or clean_sub.lower() == "unknown":
+                return unknown_album_id, unknown_dir
+
+        if clean_sub in album_cache:
+            return album_cache[clean_sub]
+
+        album_name = clean_sub
+        album_rel = f"albums/{clean_sub}"
+        target_dir = os.path.join(drive_path, "albums", clean_sub)
+        os.makedirs(target_dir, exist_ok=True)
+
+        cursor.execute(
+            "SELECT id FROM albums WHERE name = ? OR relative_path = ?",
+            (album_name, album_rel),
+        )
+        existing = cursor.fetchone()
+        if existing:
+            alb_id = existing[0]
+        else:
+            cursor.execute(
+                "INSERT INTO albums (name, relative_path, description) VALUES (?, ?, ?)",
+                (album_name, album_rel, f"Album: {album_name}"),
+            )
+            conn.commit()
+            alb_id = cursor.lastrowid
+            add_log("info", f"Created album '{album_name}'", album_rel)
+
+        album_cache[clean_sub] = (alb_id, target_dir)
+        album_cache[album_name] = (alb_id, target_dir)
+        album_cache[album_rel] = (alb_id, target_dir)
+        return alb_id, target_dir
 
     stack = [start_dir]
 
@@ -106,7 +174,7 @@ def walk_directory(
             if not scan_state.scanning:
                 break
 
-            rel_entry_path = os.path.relpath(entry.path, drive_path)
+            rel_entry_path = os.path.relpath(entry.path, drive_path).replace("\\", "/")
 
             if is_ignored(rel_entry_path, ignore_list):
                 continue
@@ -144,28 +212,42 @@ def walk_directory(
                     )
                     continue
 
+                rel_dir = (
+                    os.path.relpath(current_dir, drive_path)
+                    .replace("\\", "/")
+                    .strip("/")
+                )
+                album_id, target_album_dir = get_or_create_album(rel_dir)
+
                 filename = entry.name
                 base_name, ext_name = os.path.splitext(filename)
-                target_dest_path = os.path.join(unknown_dir, filename)
+                target_dest_path = os.path.join(target_album_dir, filename)
 
-                if os.path.exists(target_dest_path):
+                if os.path.abspath(entry.path) != os.path.abspath(
+                    target_dest_path
+                ) and os.path.exists(target_dest_path):
                     counter = 1
                     while os.path.exists(
-                        os.path.join(unknown_dir, f"{base_name}_{counter}{ext_name}")
+                        os.path.join(
+                            target_album_dir, f"{base_name}_{counter}{ext_name}"
+                        )
                     ):
                         counter += 1
                     target_dest_path = os.path.join(
-                        unknown_dir, f"{base_name}_{counter}{ext_name}"
+                        target_album_dir, f"{base_name}_{counter}{ext_name}"
                     )
 
-                dest_relative_path = os.path.relpath(target_dest_path, drive_path)
+                dest_relative_path = os.path.relpath(
+                    target_dest_path, drive_path
+                ).replace("\\", "/")
                 file_size = entry.stat().st_size
                 mime_type = (
                     mimetypes.guess_type(entry.path)[0]
                     or f"application/{ext.lstrip('.')}"
                 )
 
-                move_file(entry.path, target_dest_path)
+                if os.path.abspath(entry.path) != os.path.abspath(target_dest_path):
+                    move_file(entry.path, target_dest_path)
 
                 cursor.execute(
                     """
@@ -180,7 +262,7 @@ def walk_directory(
                         dest_relative_path,
                         file_size,
                         mime_type,
-                        unknown_album_id,
+                        album_id,
                     ),
                 )
                 conn.commit()
@@ -194,6 +276,21 @@ def walk_directory(
 
                 thumb_target = os.path.join(albums_dir, "thumbs", f"{file_hash}.jpg")
                 queue_background_thumbnail(target_dest_path, thumb_target)
+
+    # Clean up empty source directories left behind by moved files
+    if scan_state.scanning and os.path.exists(start_dir):
+        for root, dirs, files in os.walk(start_dir, topdown=False):
+            if root == drive_path or root == start_dir:
+                continue
+            rel_root = os.path.relpath(root, drive_path).replace("\\", "/")
+            if is_ignored(rel_root, ignore_list):
+                continue
+            if rel_root == "albums" or rel_root.startswith("albums/"):
+                continue
+            try:
+                os.rmdir(root)
+            except OSError:
+                pass
 
     conn.close()
     add_log(
